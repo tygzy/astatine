@@ -58,12 +58,10 @@ class Astatine(object):
         self._pluginManager = None
         self._sessionPlugin = None
         self._lock = threading.Lock()
-        self._settings = AstatineJSON('settings.json').read()
-        self._session_life = self._settings['session_life']
-        self._days = self._session_life['days']
-        self._hours = self._session_life['hours']
-        self._minutes = self._session_life['minutes']
-        self._seconds = self._session_life['seconds']
+        self._days = 100
+        self._hours = 24
+        self._minutes = 60
+        self._seconds = 60
         self._life = self._days * self._hours * self._minutes * self._seconds
         self.ss = None
         self.cursor = self._cursor
@@ -74,7 +72,7 @@ class Astatine(object):
             '.ots', '.fods', '.uos', '.odp', '.otp', '.odg', '.fodp', '.uop', '.odg', '.otg', '.fodg', '.odf', '.mml')
         self.ASTATINE_FILE_DIR = None
         self.ASTATINE_FILE_DIRS = []
-        if sqlName:
+        if sql_name:
             self._setupSQLite3()
         self.app = Bottle()
         self._setup_astatine()
@@ -277,7 +275,7 @@ class Astatine(object):
         else:
             save_path = 'views/data/'
             if file_dir:
-                save_path = save_path + fileDir
+                save_path = save_path + file_dir
             if not os.path.exists(save_path):
                 os.makedirs(save_path)
 
@@ -294,7 +292,7 @@ class Astatine(object):
             else:
                 save_path = 'views/data/'
                 if file_dir:
-                    save_path = save_path + fileDir
+                    save_path = save_path + file_dir
                 if not os.path.exists(save_path):
                     os.makedirs(save_path)
 

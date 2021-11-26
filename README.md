@@ -11,11 +11,11 @@ if the css file is in that main directory you only need to provide the file name
     - This is the same if you use a file inside your CSS e.g. an svg reference you only need to provide the file name unless the file is embedded further in the directory.
     - This is also the case for other file types such as `.js .css .scss .svg .jpg .png .ttf .eot .ttf .woff .woff2`.
 - All basic website directories will be made when you call the class for the first time if the directories don't already exist.
-- To use sessions the 'add_session_support()' function, this needs to be called otherwise sessions won't be enabled.
+- To use sessions(cookies) the 'enable_sessions()' function, this needs to be called otherwise sessions won't be enabled.
 - For allowing a user to download a file make a link with the route '/download/<filename>'.
 - When uploading a file to the web server, it will automatically upload to `/views/data`.
 - The base class also allows the use of SQLite3 with ease, requiring no setup, just use the `modify_SQL()` and `return_SQL()` functions to interact with your database.
-- A function that allows the creation of a UUID that checks in a provided table whether that UUID already exists to make sure it is unique.
+- A function that allows the creation of a UUID, which checks in a provided table whether that UUID already exists to make sure it is unique.
 
 ## Examples
 
@@ -50,11 +50,11 @@ __This will create a basic website with an index page and also handle a 404 erro
 Error handling.
 
 ```
-    # You can use this:
-    self.astatine.add_error_handler(404, self.error_page)
+# You can use this:
+self.astatine.add_error_handler(404, self.error_page)
 
-    # Or this to handle multiple kinds of errors all in one function
-    self.astatine.add_error_handler([400, 401, 402, 403, 404], self.error_page)
+# Or this to handle multiple kinds of errors all in one function
+self.astatine.add_error_handler([400, 401, 402, 403, 404], self.error_page)
 ```
 
 The two methods of interacting with an SQLite3 database.
