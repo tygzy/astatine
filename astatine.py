@@ -42,14 +42,9 @@ class Astatine(object):
         self._quiet = quiet
         self._cursor = None
         self._sqlName = sql_name
-        self._viewDir = 'views/'
-        self._cssDir = 'views/css/'
-        self._sqlDir = 'views/sql/'
-        self._svgDir = 'views/svg/'
-        self._jsDir = 'views/js/'
-        self._tmp = 'views/data/'
-        self._fnt = 'views/fnt/'
-        self._img = 'views/img/'
+        self._dirs = ['views/', 'views/sql/', 'views/css/',  'views/svg/',
+                      'views/js/', 'views/data/', 'views/fnt/', 'views/img/',
+                      'user_data/']
         self._pluginManager = None
         self._sessionPlugin = None
         self._lock = threading.Lock()
@@ -91,23 +86,20 @@ class Astatine(object):
 
     def _setup_sql(self):
         """Creates SQLite3 database."""
-        self._conn = sqlite3.connect('{}/{}'.format(self._sqlDir, self._sqlName), check_same_thread=False)
+        self._conn = sqlite3.connect('{}/{}'.format(self._dirs[1], self._sqlName), check_same_thread=False)
         self._cursor = self._conn.cursor()
         self.cursor = self._cursor
 
     def _end_sql(self):
         self._conn.commit()
-        self._cursor.close()
 
     def _setup_astatine(self):
         """Creates all directories."""
-        directories = [self._viewDir, self._jsDir, self._cssDir, self._svgDir, self._sqlDir, self._tmp, self._fnt, self._img]
-        for directory in directories:
+        for directory in self._dirs:
             if not os.path.exists(directory):
                 os.makedirs(directory)
 
-    @staticmethod
-    def _download_file(filepath: str = '') -> static_file:
+    def _download_file(self, filepath: str = '') -> static_file:
         return static_file(filepath, root="", download=filepath)
 
     def _static_files(self, filepath) -> static_file:
@@ -216,45 +208,28 @@ class Astatine(object):
             is_unique = True
         return new_id
 
-    def upload_file(self, bottle_file, allowed_exts, file_dir=None, overwrite=False, rename=None, save_path=None):
-        name, ext = os.path.splitext(bottle_file.filename)
-        if ext not in allowed_exts and allowed_exts != '.*' and allowed_exts != '*':
-            raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
+    def upload_file(self, file, extensions, path, overwrite=False, rename=None):
+        name, ext = file.filename.split('.')
+        if ext in extensions or extensions is '*':
+            if path:
+                path = path + rename + '.' + ext or file.filename
+            else:
+                path = rename + '.' + ext or file.filename
+            file.save(path, overwrite=overwrite)
         else:
-            save_path = save_path or 'views/data/'
-            if file_dir:
-                save_path = save_path + file_dir
-            if not os.path.exists(save_path):
-                os.makedirs(save_path)
-            if rename:
-                bottle_file.filename = rename + ext.lower()
+            raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
+
+    def upload_files(self, files, extensions, path, overwrite=False, rename=None):
+        for file in files:
+            name, ext = file.filename.split('.')
+            if ext in extensions or extensions is '*':
+                if path:
+                    path = path + rename + '.' + ext or file.filename
+                else:
+                    path = rename + '.' + ext or file.filename
+                file.save(path, overwrite=overwrite)
             else:
-                bottle_file.filename = name + ext.lower()
-
-            file_path = "{path}/{file}".format(path=save_path, file=bottle_file.filename)
-            bottle_file.save(file_path, overwrite=overwrite)
-            self.BASE_FILE_DIR = file_path
-
-    def upload_files(self, bottle_file, allowed_exts, file_dir=None, overwrite=False, rename=None, save_path=None):
-        for file in bottle_file:
-            name, ext = os.path.splitext(file.filename)
-            if ext not in allowed_exts and allowed_exts != '.*' and allowed_exts != '*':
                 raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
-            else:
-                save_path = save_path or 'views/data/'
-                if file_dir:
-                    save_path = save_path + file_dir
-                if not os.path.exists(save_path):
-                    os.makedirs(save_path)
-
-                file.filename = name + ext.lower()
-
-                if rename:
-                    file.filename = rename + ext.lower()
-
-                file_path = "{path}/{file}".format(path=save_path, file=file.filename)
-                file.save(file_path, overwrite=overwrite)
-                self.ASTATINE_FILE_DIRS.append(file_path)
 
     @staticmethod
     def remove_file(fileName):
@@ -290,9 +265,13 @@ class Astatine(object):
         try:
             self._lock.acquire(True)
             if values:
-                return self._cursor.execute("%s" % query, values).fetchall() if fetchall else self._cursor.execute("%s" % query, values).fetchone()
+                execution =  self._cursor.execute("%s" % query, values).fetchall() if fetchall else self._cursor.execute("%s" % query, values).fetchone()
+                self._conn.commit()
+                return execution
             else:
-                return self._cursor.execute("%s" % query).fetchall() if fetchall else self._cursor.execute("%s" % query).fetchone()
+                execution = self._cursor.execute("%s" % query).fetchall() if fetchall else self._cursor.execute("%s" % query).fetchone()
+                self._conn.commit()
+                return execution
         finally:
             self._lock.release()
 
@@ -306,14 +285,14 @@ class AstatineSQL(object):
 
     def __init__(self, fileName, sql_dir=None):
         self._sqlName = fileName
-        self._sqlDir = sql_dir
+        self._sql_dir = sql_dir
         self._cursor = None
         self._conn = None
         self._lock = threading.Lock()
 
     def connect(self):
         """Creates SQLite3 database."""
-        self._conn = sqlite3.connect('{}/{}'.format(self._sqlDir, self._sqlName), check_same_thread=False)
+        self._conn = sqlite3.connect('{}/{}'.format(self._sql_dir, self._sqlName), check_same_thread=False)
         self._cursor = self._conn.cursor()
 
     def commit(self):
