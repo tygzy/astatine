@@ -1,23 +1,17 @@
-import random
+import string, threading, json, os, functools, sqlite3, random
+import smtplib, requests, ssl, hashlib, base64, bottle_pxsession
 
 from bottle import Bottle, static_file, redirect
-import sqlite3
-import functools
-import os
-import json
-import threading
-import string
-
-import bottle_pxsession
-from Crypto import Random
-from Crypto.Cipher import AES
-import hashlib
-import base64
-
-import smtplib
-import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+aes_disabled = False
+try:
+    from Crypto import Random
+    from Crypto.Cipher import AES
+    aes_disabled = False
+except ModuleNotFoundError:
+    aes_disabled = True
 
 sqlDir = '/views/sql'
 
@@ -39,12 +33,13 @@ class Astatine(object):
         - A function that allows the creation of a UUID that checks in a provided table whether that UUID already exists to make sure it is unique.
     """
 
-    def __init__(self, host='localhost', port=8080, debug=True, reload=False, server=None, sql_name=None):
+    def __init__(self, host='localhost', port=8080, debug=True, reload=False, server=None, quiet=None, sql_name=None):
         self._port = port
         self._host = host
         self._debug = debug
         self._reload = reload
         self._server = server
+        self._quiet = quiet
         self._cursor = None
         self._sqlName = sql_name
         self._viewDir = 'views/'
@@ -70,10 +65,20 @@ class Astatine(object):
             '.doc', '.dot', '.wbk', '.docx', '.docm', '.dotm', '.docb', '.xls', '.xlsx', '.xlsm', '.xlt', '.xltx', '.xltm',
             '.xla', '.xlam', '.one', '.pptx', '.ppt', '.pptjpeg', '.pptpng', '.odt', '.ott', '.fodt', '.uot', '.ods',
             '.ots', '.fods', '.uos', '.odp', '.otp', '.odg', '.fodp', '.uop', '.odg', '.otg', '.fodg', '.odf', '.mml')
+
+        self._static_files_ext = {
+            'css': ['css', 'scss', 'less'],
+            'img': ['png', 'jpg', 'jpeg', 'gif', 'tiff', 'psd', 'raw'],
+            'svg': ['svg'],
+            'fav': ['ico'],
+            'js': ['js'],
+            'fnt': ['otf', 'ttf', 'eot', 'woff', 'woff2']
+        }
+
         self.ASTATINE_FILE_DIR = None
         self.ASTATINE_FILE_DIRS = []
-        if sql_name:
-            self._setupSQLite3()
+        if self._sqlName:
+            self._setup_sql()
         self.app = Bottle()
         self._setup_astatine()
         self._route()
@@ -84,14 +89,15 @@ class Astatine(object):
         else:
             return False
 
-    def _setupSQLite3(self):
+    def _setup_sql(self):
         """Creates SQLite3 database."""
         self._conn = sqlite3.connect('{}/{}'.format(self._sqlDir, self._sqlName), check_same_thread=False)
         self._cursor = self._conn.cursor()
         self.cursor = self._cursor
 
-    def _endSQLite3(self):
+    def _end_sql(self):
         self._conn.commit()
+        self._cursor.close()
 
     def _setup_astatine(self):
         """Creates all directories."""
@@ -101,107 +107,35 @@ class Astatine(object):
                 os.makedirs(directory)
 
     @staticmethod
-    def _cssFile(filepath: str = '') -> static_file:
-        path = ""
-        if len(filepath.split("/")) > 1:
-            if "data" in filepath.split("/"):
-                path = "views/"
-        else:
-            path = "views/css/"
-        return static_file(filepath, root=path)
-
-    @staticmethod
-    def _scssFile(filepath: str = '') -> static_file:
-        path = ""
-        if len(filepath.split("/")) > 1:
-            if "data" in filepath.split("/"):
-                path = "views/"
-        else:
-            path = "views/scss/"
-        return static_file(filepath, root=path)
-
-    @staticmethod
-    def _jsFile(filepath: str = '') -> static_file:
-        path = ""
-        if len(filepath.split("/")) > 1:
-            if "data" in filepath.split("/"):
-                path = "views/"
-        else:
-            path = "views/js/"
-        return static_file(filepath, root=path)
-
-    @staticmethod
-    def _svgFile(filepath: str = '') -> static_file:
-        path = ""
-        if len(filepath.split("/")) > 1:
-            if "data" in filepath.split("/"):
-                path = "views/"
-        else:
-            path = "views/svg/"
-        return static_file(filepath, root=path)
-
-    @staticmethod
-    def _fontFile(filepath: str = '') -> static_file:
-        path = ""
-        if len(filepath.split("/")) > 1:
-            if "data" in filepath.split("/"):
-                path = "views/"
-        else:
-            path = "views/fnt/"
-        return static_file(filepath, root=path)
-
-    @staticmethod
-    def _imgFile(filepath: str = '') -> static_file:
-        path = ""
-        if len(filepath.split("/")) > 1:
-            if "data" in filepath.split("/"):
-                path = "views/"
-        else:
-            path = "views/img/"
-        return static_file(filepath, root=path)
-
-    @staticmethod
-    def _jpgFile(filepath: str = '') -> static_file:
-        path = ""
-        if len(filepath.split("/")) > 1:
-            if "data" in filepath.split("/"):
-                path = "views/"
-        else:
-            path = "views/jpg/"
-        return static_file(filepath, root=path)
-
-    @staticmethod
-    def _faviconFile(filepath: str = '') -> static_file:
-        path = ""
-        if len(filepath.split("/")) > 1:
-            if "data" in filepath.split("/"):
-                path = "views/"
-        else:
-            path = "views/"
-        return static_file(filepath, root=path, mimetype='image/x-icon')
-
-    @staticmethod
-    def _downloadFile(filepath: str = '') -> static_file:
+    def _download_file(filepath: str = '') -> static_file:
         return static_file(filepath, root="", download=filepath)
 
+    def _static_files(self, filepath) -> static_file:
+        path = None
+        favicon = False
+        if '.' in filepath:
+            name, ext = filepath.split('.')
+            for k, v in self._static_files_ext.items():
+                if ext in v:
+                    path = "views/{}/".format(k)
+                    favicon = True if k == 'fav' else False
+
+            if '/' in filepath:
+                if 'user_data' in filepath.split('/'):
+                    path = ''
+            return static_file(filepath, root=path) if not favicon else static_file(filepath, root=path, mimetype='image/x-icon')
 
     def _route(self):
-        css = functools.partial(self._cssFile, filepath='filepath')
-        scss = functools.partial(self._scssFile, filepath='filepath')
-        js = functools.partial(self._jsFile, filepath='filepath')
-        svg = functools.partial(self._svgFile, filepath='filepath')
-        df = functools.partial(self._downloadFile, filepath='filepath')
-        fnt = functools.partial(self._fontFile, filepath='filepath')
-        img = functools.partial(self._imgFile, filepath='filepath')
-        favicon = functools.partial(self._faviconFile, filepath='filepath')
-        self.app.route("/<filepath:re:.*\\.css>", method='GET', callback=css)
-        self.app.route("/<filepath:re:.*\\.scss>", method='GET', callback=scss)
-        self.app.route("/<filepath:re:.*\\.js>", method='GET', callback=js)
-        self.app.route("/<filepath:re:.*\\.svg>", method='GET', callback=svg)
+        static_files = functools.partial(self._static_files, filepath='filepath')
+        df = functools.partial(self._download_file, filepath='filepath')
+
+        all_extensions = []
+        for v in self._static_files_ext.values():
+            for i in v:
+                all_extensions.append(i)
+
         self.app.route("/download/<filepath:path>", method='GET', callback=df)
-        self.app.route("/<filepath:re:.*\\.(otf|ttf|svg|eot|woff|woff2)>", method='GET', callback=fnt)
-        self.app.route("/<filepath:re:.*\\.(png|jpg|gif|jpeg|tiff|psd|pdf|ai|eps|raw)>", method='GET', callback=img)
-        self.app.route("/<filepath:re:.*\\.ico>", method='GET', callback=favicon)
+        self.app.route("/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
 
     def enable_sessions(self):
         """
@@ -233,31 +167,31 @@ class Astatine(object):
 
     def add_error_handler(self, code, function):
         """
-        :param code: Error code to pair with the function
+        :param code: Error code to pair with the function, can pass singular code or list of codes
         :param function: Function callback
         :return:
         """
-        self.app.error_handler[code] = function
+        if type(code) == list:
+            for c in code:
+                self.app.error_handler[c] = function
+        else:
+            self.app.error_handler[code] = function
 
-    def add_errors_handler(self, code, function):
-        """
-        :param code: List type to allow multiple error codes to be handled in one function call
-        :param function: Function callback
-        :return:
-        """
-        for c in code:
-            self.app.error_handler[c] = function
-
-    def random_string(self, string_length):
+    def random_string(self, string_length, special=False):
         letters = string.ascii_letters
-        return ''.join(random.choice(letters) for i in range(string_length))
+        numbers = '0123456789'
+        specials = '!£$%&*;:@~#<>,./?'
+        combo = numbers + letters
+        if special:
+            combo += specials
+        return ''.join(random.choice(combo) for i in range(string_length))
 
     def generate_unique_id(self, table_name, id_name):
         is_unique = False
         new_id = 0
         while not is_unique:
             new_id = self.random_string(20)
-            table = self._cursor.execute("SELECT id FROM {} WHERE {} = ?".format(table_name, id_name), (new_id,))
+            table = self._cursor.execute("SELECT {} FROM {} WHERE {} = ?".format(id_name, table_name, id_name), (new_id,))
             for t in table:
                 if not t:
                     is_unique = True
@@ -267,37 +201,59 @@ class Astatine(object):
             is_unique = True
         return new_id
 
-    def upload_file(self, bottle_file, allowed_exts, file_dir=None, overwrite=False, rename=None):
+    def generate_uuid(self, table_name, id_name):
+        is_unique = False
+        new_id = 0
+        while not is_unique:
+            new_id = self.random_string(40, True)
+            table = self._cursor.execute("SELECT {} FROM {} WHERE {} = ?".format(id_name, table_name, id_name), (new_id,))
+            for t in table:
+                if not t:
+                    is_unique = True
+                    break
+                else:
+                    continue
+            is_unique = True
+        return new_id
+
+    def upload_file(self, bottle_file, allowed_exts, file_dir=None, overwrite=False, rename=None, save_path=None):
         name, ext = os.path.splitext(bottle_file.filename)
-        if ext not in allowed_exts:
-            redirect('/')
+        if ext not in allowed_exts and allowed_exts != '.*' and allowed_exts != '*':
             raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
         else:
-            save_path = 'views/data/'
+            save_path = save_path or 'views/data/'
             if file_dir:
                 save_path = save_path + file_dir
             if not os.path.exists(save_path):
                 os.makedirs(save_path)
+            if rename:
+                bottle_file.filename = rename + ext.lower()
+            else:
+                bottle_file.filename = name + ext.lower()
 
             file_path = "{path}/{file}".format(path=save_path, file=bottle_file.filename)
-            bottle_file.save(file_path, overwrite=overwrite, rename=rename)
+            bottle_file.save(file_path, overwrite=overwrite)
             self.BASE_FILE_DIR = file_path
 
-    def upload_files(self, bottle_file, allowed_exts, file_dir=None, overwrite=False, rename=None):
+    def upload_files(self, bottle_file, allowed_exts, file_dir=None, overwrite=False, rename=None, save_path=None):
         for file in bottle_file:
             name, ext = os.path.splitext(file.filename)
-            if ext not in allowed_exts:
-                redirect('/')
-                raise Exception('[ FILE ISSUE ] - File Extension is not allowed: {}.{}'.format(name, ext))
+            if ext not in allowed_exts and allowed_exts != '.*' and allowed_exts != '*':
+                raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
             else:
-                save_path = 'views/data/'
+                save_path = save_path or 'views/data/'
                 if file_dir:
                     save_path = save_path + file_dir
                 if not os.path.exists(save_path):
                     os.makedirs(save_path)
 
+                file.filename = name + ext.lower()
+
+                if rename:
+                    file.filename = rename + ext.lower()
+
                 file_path = "{path}/{file}".format(path=save_path, file=file.filename)
-                file.save(file_path, overwrite=overwrite, rename=rename)
+                file.save(file_path, overwrite=overwrite)
                 self.ASTATINE_FILE_DIRS.append(file_path)
 
     @staticmethod
@@ -314,60 +270,31 @@ class Astatine(object):
                          port=self._port,
                          debug=self._debug,
                          reloader=self._reload,
-                         server=self._server)
+                         server=self._server,
+                         quiet=self._quiet)
         else:
             self.app.run(host=self._host,
                          port=self._port,
                          debug=self._debug,
-                         reloader=self._reload)
-        self._endSQLite3()
+                         reloader=self._reload,
+                         quiet=self._quiet)
+        self._end_sql()
 
-    def modify_SQL(self, query, values=None):
-        """
-        :param query: The SQLite3 query you want to make
-        :param values: Any values you need to pass into the SQLite3 query
-        :return:
-        """
-        try:
-            self._lock.acquire(True)
-            self._cursor.execute(("{}".format(query)), values)
-            self._conn.commit()
-        finally:
-            self._lock.release()
-
-    def return_SQL(self, query, values=None, fetchall=True):
+    def execute_sql(self, query, values=None, fetchall=True):
         """
         :param query: The SQLite3 query you want to make
         :param values: Any values you need to pass into the SQLite3 query
         :param fetchall: Whether it should <fetchall> or <fetchone>, default is True
         :return:
         """
-        if values is not None:
-            if fetchall:
-                try:
-                    self._lock.acquire(True)
-                    return self._cursor.execute("{}".format(query), values).fetchall()
-                finally:
-                    self._lock.release()
+        try:
+            self._lock.acquire(True)
+            if values:
+                return self._cursor.execute("%s" % query, values).fetchall() if fetchall else self._cursor.execute("%s" % query, values).fetchone()
             else:
-                try:
-                    self._lock.acquire(True)
-                    return self._cursor.execute("{}".format(query), values).fetchone()
-                finally:
-                    self._lock.release()
-        elif values is None:
-            if fetchall:
-                try:
-                    self._lock.acquire(True)
-                    return self._cursor.execute("{}".format(query)).fetchall()
-                finally:
-                    self._lock.release()
-            else:
-                try:
-                    self._lock.acquire(True)
-                    return self._cursor.execute("{}".format(query)).fetchone()
-                finally:
-                    self._lock.release()
+                return self._cursor.execute("%s" % query).fetchall() if fetchall else self._cursor.execute("%s" % query).fetchone()
+        finally:
+            self._lock.release()
 
     def function_SQL(self, name, parameters, callback):
         sqlite3.enable_callback_tracebacks(True)
@@ -384,47 +311,34 @@ class AstatineSQL(object):
         self._conn = None
         self._lock = threading.Lock()
 
-    def Connect(self):
+    def connect(self):
         """Creates SQLite3 database."""
         self._conn = sqlite3.connect('{}/{}'.format(self._sqlDir, self._sqlName), check_same_thread=False)
         self._cursor = self._conn.cursor()
 
-    def Commit(self):
+    def commit(self):
         self._conn.commit()
 
-    def Close(self):
+    def close(self):
         self._cursor.close()
 
-    def modify_SQL(self, query, values=None):
-        """
-        :param query: The SQLite3 query you want to make
-        :param values: Any values you need to pass into the SQLite3 query
-        :return:
-        """
-        try:
-            self._lock.acquire(True)
-            self._cursor.execute(("{}".format(query)), values)
-            self._conn.commit()
-        finally:
-            self._lock.release()
-
-    def return_SQL(self, query, values=None, fetchall=True):
+    def execute_sql(self, query, values=None, fetchall=True):
         """
         :param query: The SQLite3 query you want to make
         :param values: Any values you need to pass into the SQLite3 query
         :param fetchall: Whether it should <fetchall> or <fetchone>
         :return:
         """
-        if values is not None:
-            if fetchall:
-                return self._cursor.execute("{}".format(query), values).fetchall()
+        try:
+            self._lock.acquire(True)
+            if values:
+                return self._cursor.execute("%s" % query, values).fetchall() if fetchall else self._cursor.execute(
+                    "%s" % query, values).fetchone()
             else:
-                return self._cursor.execute("{}".format(query), values).fetchone()
-        elif values is None:
-            if fetchall:
-                return self._cursor.execute("{}".format(query)).fetchall()
-            else:
-                return self._cursor.execute("{}".format(query)).fetchone()
+                return self._cursor.execute("%s" % query).fetchall() if fetchall else self._cursor.execute(
+                    "%s" % query).fetchone()
+        finally:
+            self._lock.release()
 
     def function_SQL(self, name, parameters, callback):
         sqlite3.enable_callback_tracebacks(True)
@@ -435,8 +349,13 @@ class AstatineAES(object):
     """ Astatine Encryption and Decryption Class """
 
     def __init__(self, key):
-        self.bs = AES.block_size
-        self.key = hashlib.sha256(key.encode()).digest()
+        if not aes_disabled:
+            self.bs = AES.block_size
+            self.key = hashlib.sha256(key.encode()).digest()
+        else:
+            print("""
+                Error: pycrypto could not be found.
+            """)
 
     def encrypt(self, raw):
         raw = self._pad(raw)
