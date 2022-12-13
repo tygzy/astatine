@@ -208,26 +208,37 @@ class Astatine(object):
             is_unique = True
         return new_id
 
-    def upload_file(self, file, extensions, path, overwrite=False, rename=None):
+    @staticmethod
+    def upload_file(file, extensions, path, overwrite=False, rename=None):
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        filepath = None
         name, ext = file.filename.split('.')
-        if ext in extensions or extensions is '*':
-            if path:
-                path = path + rename + '.' + ext or file.filename
+        if ext in extensions or extensions == '*':
+            if rename:
+                filepath = path + rename + '.' + ext if path else rename + '.' + ext
             else:
-                path = rename + '.' + ext or file.filename
-            file.save(path, overwrite=overwrite)
+                filepath = path + file.filename if path else file.filename
+            file.save(filepath, overwrite=overwrite)
         else:
             raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
 
-    def upload_files(self, files, extensions, path, overwrite=False, rename=None):
+    @staticmethod
+    def upload_files(files, extensions, path, overwrite=False, rename=None):
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        filepath = None
         for file in files:
             name, ext = file.filename.split('.')
-            if ext in extensions or extensions is '*':
-                if path:
-                    path = path + rename + '.' + ext or file.filename
+            if ext in extensions or extensions == '*':
+                if rename:
+                    filepath = path + rename + '.' + ext if path else rename + '.' + ext
                 else:
-                    path = rename + '.' + ext or file.filename
-                file.save(path, overwrite=overwrite)
+                    filepath = path + file.filename if path else file.filename
+
+                file.save(filepath, overwrite=overwrite)
             else:
                 raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
 
