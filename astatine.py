@@ -1,9 +1,19 @@
-import string, threading, json, os, functools, sqlite3, random
-import smtplib, requests, ssl, hashlib, base64, bottle_pxsession
-
-from bottle import Bottle, static_file, redirect
-from email.mime.text import MIMEText
+import base64
+import bottle_pxsession
+import functools
+import hashlib
+import json
+import os
+import random
+import smtplib
+import sqlite3
+import ssl
+import string
+import threading
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+from bottle import Bottle, static_file, abort
 
 aes_disabled = False
 try:
@@ -18,19 +28,16 @@ sqlDir = '/views/sql'
 
 class Astatine(object):
     """
-    This is my bottle website Astatine class, used to make making websites easier and faster, especially first setting up a new website.
+    bottle mini framework to allow bottle to be used in a class with useful functions implemented to be used easily
 
     Information:
-        - When adding a file to your html file e.g. CSS you only need to provide the filepath past the 'css' directory,
-        if the css file is in that main directory you only need to provide the file name.
-            - This is the same if you use a file inside your CSS e.g. an svg reference you only need to provide the file name unless the file is embedded further in the directory.
-            - This is also the case for other file types such as .js .css .scss .svg .jpg .png .ttf .eot .ttf .woff .woff2.
-        - All basic website directories will be made when you call the class for the first time if the directories don't already exist.
-        - To use sessions the 'addSessionSupport()' function, this needs to be called otherwise sessions won't be enabled.
-        - For allowing a user to download a file make a link with the route '/download/<filename>'.
-        - When uploading a file to the web server, it will automatically upload to `/views/data`.
-        - The Astatine class also allows the use of SQLite3 with ease, requiring no setup, just use the `modifySQL()` and `returnSQL()` functions to interact with your database.
-        - A function that allows the creation of a UUID that checks in a provided table whether that UUID already exists to make sure it is unique.
+        - static files are already implemented into astatine
+        - uploading files with different conditions is now a single function, e.g. renaming or overwriting
+        - default directories are created on first start of the server
+        - downloading files is implemented
+        - easily define routes and error pages
+        - check a value type and throw code 422 if it isn't the desired type, to be used on form values
+        - sqlite functionality
     """
 
     def __init__(self, host='localhost', port=8080, debug=True, reload=False, server=None, quiet=None, sql_name=None):
@@ -41,12 +48,12 @@ class Astatine(object):
         self._server = server
         self._quiet = quiet
         self._cursor = None
-        self._sqlName = sql_name
+        self._sql_name = sql_name
         self._dirs = ['views/', 'views/sql/', 'views/css/',  'views/svg/',
                       'views/js/', 'views/data/', 'views/fnt/', 'views/img/',
                       'user_data/']
-        self._pluginManager = None
-        self._sessionPlugin = None
+        self._plugin_manager = None
+        self._session_plugin = None
         self._lock = threading.Lock()
         self._days = 100
         self._hours = 24
@@ -55,24 +62,13 @@ class Astatine(object):
         self._life = self._days * self._hours * self._minutes * self._seconds
         self.ss = None
         self.cursor = self._cursor
-        self.hasSessions = False
-        self.ASTATINE_ALL_DOC_EXTS = (
-            '.doc', '.dot', '.wbk', '.docx', '.docm', '.dotm', '.docb', '.xls', '.xlsx', '.xlsm', '.xlt', '.xltx', '.xltm',
-            '.xla', '.xlam', '.one', '.pptx', '.ppt', '.pptjpeg', '.pptpng', '.odt', '.ott', '.fodt', '.uot', '.ods',
-            '.ots', '.fods', '.uos', '.odp', '.otp', '.odg', '.fodp', '.uop', '.odg', '.otg', '.fodg', '.odf', '.mml')
+        self.has_sessions = False
+        self.uid_length = 20
 
-        self._static_files_ext = {
-            'css': ['css', 'scss', 'less'],
-            'img': ['png', 'jpg', 'jpeg', 'gif', 'tiff', 'psd', 'raw'],
-            'svg': ['svg'],
-            'fav': ['ico'],
-            'js': ['js'],
-            'fnt': ['otf', 'ttf', 'eot', 'woff', 'woff2']
-        }
+        self._static_files_ext = ['css', 'scss', 'less', 'png', 'jpg', 'jpeg', 'gif', 'tiff',
+                                  'psd', 'raw', 'svg', 'ico', 'js', 'otf', 'ttf', 'eot', 'woff', 'woff2']
 
-        self.ASTATINE_FILE_DIR = None
-        self.ASTATINE_FILE_DIRS = []
-        if self._sqlName:
+        if self._sql_name:
             self._setup_sql()
         self.app = Bottle()
         self._setup_astatine()
@@ -86,7 +82,7 @@ class Astatine(object):
 
     def _setup_sql(self):
         """Creates SQLite3 database."""
-        self._conn = sqlite3.connect('{}/{}'.format(self._dirs[1], self._sqlName), check_same_thread=False)
+        self._conn = sqlite3.connect('{}/{}'.format(self._dirs[1], self._sql_name), check_same_thread=False)
         self._cursor = self._conn.cursor()
         self.cursor = self._cursor
 
@@ -99,113 +95,80 @@ class Astatine(object):
             if not os.path.exists(directory):
                 os.makedirs(directory)
 
-    def _download_file(self, filepath: str = '') -> static_file:
+    def _download_file(self, filepath) -> static_file:
         return static_file(filepath, root="", download=filepath)
 
     def _static_files(self, filepath) -> static_file:
-        path = None
+        name, ext = os.path.splitext(filepath)
         favicon = False
-        if '.' in filepath:
-            name, ext = filepath.split('.')
-            for k, v in self._static_files_ext.items():
-                if ext in v:
-                    path = "views/{}/".format(k)
-                    favicon = True if k == 'fav' else False
-
-            if '/' in filepath:
-                if 'user_data' in filepath.split('/'):
-                    path = ''
-            return static_file(filepath, root=path) if not favicon else static_file(filepath, root=path, mimetype='image/x-icon')
+        if ext[1:] in self._static_files_ext:
+            favicon = True if ext[1:] == 'ico' else False
+            return static_file(filepath, '') if not favicon else static_file(filepath, '', mimetype='image/x-icon')
+        else:
+            print('Error 404: Could not find file "{}"'.format(filepath))
 
     def _route(self):
         static_files = functools.partial(self._static_files, filepath='filepath')
         df = functools.partial(self._download_file, filepath='filepath')
 
         all_extensions = []
-        for v in self._static_files_ext.values():
-            for i in v:
-                all_extensions.append(i)
+        for i in self._static_files_ext:
+            all_extensions.append(i)
 
         self.app.route("/download/<filepath:path>", method='GET', callback=df)
         self.app.route("/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
 
     def enable_sessions(self):
         """
-        This is so you can enable session support for your routes.
+        Enable session usage in routes.
         :return:
         """
-        self._sessionPlugin = bottle_pxsession.SessionPlugin(cookie_lifetime=self._life)
-        self.ss = self.app.install(self._sessionPlugin)
-        self.hasSessions = True
+        self._session_plugin = bottle_pxsession.SessionPlugin(cookie_lifetime=self._life)
+        self.ss = self.app.install(self._session_plugin)
+        self.has_sessions = True
 
-    def add_route(self, name: str, method: str, function: object, sessions=False):
+    def route(self, name, method, function, sessions=False, args=None):
         """
         :param name: The route/name
-        :param method: 'GET' or 'POST'
-        :param function: The function/method to link to the route
+        :param method: 'GET', 'PUT', 'DELETE' or 'POST'
+        :param function: The function/method to link to the route.
         :param sessions: Whether this route should use sessions.
+        :param args: provide extra arguments to the function.
         :return:
         """
+        fn = functools.partial(function, args) if args else function
         if not sessions:
-            self.app.route(name, method=method, callback=function)
-        elif sessions and self.hasSessions:
-            self.app.route(name, method=method, callback=function, apply=[self.ss])
-        else:
-            raise Exception('[ FATAL ISSUE ] - Route could not be created.')
+            self.app.route(name, method=method, callback=fn)
+        elif sessions and self.has_sessions:
+            self.app.route(name, method=method, callback=fn, apply=[self.ss])
 
-    def add_route_args(self, name, method, function, arg):
-        fn = functools.partial(function, arg)
-        self.app.route(name, method=method, callback=fn, apply=[self.ss])
-
-    def add_error_handler(self, code, function):
+    def error(self, code, function):
         """
         :param code: Error code to pair with the function, can pass singular code or list of codes
         :param function: Function callback
         :return:
         """
-        if type(code) == list:
+        if isinstance(code, list):
             for c in code:
                 self.app.error_handler[c] = function
         else:
             self.app.error_handler[code] = function
 
-    def random_string(self, string_length, special=False):
+    @staticmethod
+    def random_string(string_length, special=False):
         letters = string.ascii_letters
         numbers = '0123456789'
         specials = '!£$%&*;:@~#<>,./?'
-        combo = numbers + letters
-        if special:
-            combo += specials
+        combo = numbers + letters + specials if special else numbers + letters
         return ''.join(random.choice(combo) for i in range(string_length))
 
-    def generate_unique_id(self, table_name, id_name):
-        is_unique = False
-        new_id = 0
+    def generate_uid(self, table_name, id_name, length=20):
+        is_unique, new_id = False, None
+        length = length if self.uid_length is length else self.uid_length
         while not is_unique:
-            new_id = self.random_string(20)
+            new_id = self.random_string(length)
             table = self._cursor.execute("SELECT {} FROM {} WHERE {} = ?".format(id_name, table_name, id_name), (new_id,))
-            for t in table:
-                if not t:
-                    is_unique = True
-                    break
-                else:
-                    continue
-            is_unique = True
-        return new_id
-
-    def generate_uuid(self, table_name, id_name):
-        is_unique = False
-        new_id = 0
-        while not is_unique:
-            new_id = self.random_string(40, True)
-            table = self._cursor.execute("SELECT {} FROM {} WHERE {} = ?".format(id_name, table_name, id_name), (new_id,))
-            for t in table:
-                if not t:
-                    is_unique = True
-                    break
-                else:
-                    continue
-            is_unique = True
+            is_unique = True if not table else False
         return new_id
 
     @staticmethod
@@ -214,15 +177,15 @@ class Astatine(object):
             os.makedirs(path)
 
         filepath = None
-        name, ext = file.filename.split('.')
+        name, ext = os.path.splitext(file.filename)
         if ext in extensions or extensions == '*':
             if rename:
-                filepath = path + rename + '.' + ext if path else rename + '.' + ext
+                filepath = path + rename + ext if path else rename + ext
             else:
                 filepath = path + file.filename if path else file.filename
             file.save(filepath, overwrite=overwrite)
         else:
-            raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
+            raise Exception('[ FILE ISSUE ] - File Extension is not allowed - {}.'.format(file.filename))
 
     @staticmethod
     def upload_files(files, extensions, path, overwrite=False, rename=None):
@@ -231,25 +194,31 @@ class Astatine(object):
 
         filepath = None
         for file in files:
-            name, ext = file.filename.split('.')
+            name, ext = os.path.splitext(file.filename)
             if ext in extensions or extensions == '*':
                 if rename:
-                    filepath = path + rename + '.' + ext if path else rename + '.' + ext
+                    filepath = path + rename + ext if path else rename + ext
                 else:
                     filepath = path + file.filename if path else file.filename
 
                 file.save(filepath, overwrite=overwrite)
             else:
-                raise Exception('[ FILE ISSUE ] - File Extension is not allowed.')
+                raise Exception('[ FILE ISSUE ] - File Extension is not allowed - {}.'.format(file.filename))
 
     @staticmethod
-    def remove_file(fileName):
-        os.remove(str(fileName))
+    def remove_file(file_name):
+        os.remove(str(file_name))
+
+    @staticmethod
+    def check_type(var, var_type):
+        if isinstance(var, var_type):
+            return var
+        else:
+            abort(422)
 
     def run_astatine(self):
         """
         Run the bottle website.
-        :return:
         """
         if self._server:
             self.app.run(host=self._host,
@@ -276,17 +245,37 @@ class Astatine(object):
         try:
             self._lock.acquire(True)
             if values:
-                execution =  self._cursor.execute("%s" % query, values).fetchall() if fetchall else self._cursor.execute("%s" % query, values).fetchone()
+                execution =  self._cursor.execute(query, values).fetchall() if fetchall else self._cursor.execute(query, values).fetchone()
                 self._conn.commit()
                 return execution
             else:
-                execution = self._cursor.execute("%s" % query).fetchall() if fetchall else self._cursor.execute("%s" % query).fetchone()
+                execution = self._cursor.execute(query).fetchall() if fetchall else self._cursor.execute(query).fetchone()
                 self._conn.commit()
                 return execution
         finally:
             self._lock.release()
 
-    def function_SQL(self, name, parameters, callback):
+    def execute_many_sql(self, query, values=None, fetchall=True):
+        """
+        :param query: The SQLite3 query you want to make
+        :param values: Any values you need to pass into the SQLite3 query
+        :param fetchall: Whether it should <fetchall> or <fetchone>, default is True
+        :return:
+        """
+        try:
+            self._lock.acquire(True)
+            if values:
+                execution = self._cursor.executemany(query, values).fetchall() if fetchall else self._cursor.executemany(query, values).fetchone()
+                self._conn.commit()
+                return execution
+            else:
+                execution = self._cursor.executemany(query).fetchall() if fetchall else self._cursor.executemany(query).fetchone()
+                self._conn.commit()
+                return execution
+        finally:
+            self._lock.release()
+
+    def create_function_sql(self, name, parameters, callback):
         sqlite3.enable_callback_tracebacks(True)
         self._conn.create_function(name, parameters, callback)
 
@@ -322,11 +311,11 @@ class AstatineSQL(object):
         try:
             self._lock.acquire(True)
             if values:
-                return self._cursor.execute("%s" % query, values).fetchall() if fetchall else self._cursor.execute(
-                    "%s" % query, values).fetchone()
+                return self._cursor.execute(query, values).fetchall() if fetchall else self._cursor.execute(
+                    query, values).fetchone()
             else:
-                return self._cursor.execute("%s" % query).fetchall() if fetchall else self._cursor.execute(
-                    "%s" % query).fetchone()
+                return self._cursor.execute(query).fetchall() if fetchall else self._cursor.execute(
+                    query).fetchone()
         finally:
             self._lock.release()
 
