@@ -10,8 +10,13 @@ import sqlite3
 import ssl
 import string
 import threading
+import math
+import re
+import dkim
+
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formatdate
 
 from bottle import Bottle, static_file, abort
 
@@ -49,7 +54,7 @@ class Astatine(object):
         self._quiet = quiet
         self._cursor = None
         self._sql_name = sql_name
-        self._dirs = ['views/', 'views/sql/', 'views/css/',  'views/svg/',
+        self._dirs = ['views/', 'views/css/',  'views/svg/',
                       'views/js/', 'views/data/', 'views/fnt/', 'views/img/',
                       'user_data/']
         self._plugin_manager = None
@@ -67,6 +72,7 @@ class Astatine(object):
 
         self._static_files_ext = ['css', 'scss', 'less', 'png', 'jpg', 'jpeg', 'gif', 'tiff',
                                   'psd', 'raw', 'svg', 'ico', 'js', 'otf', 'ttf', 'eot', 'woff', 'woff2']
+        self._image_ext = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', '']
 
         if self._sql_name:
             self._setup_sql()
@@ -82,7 +88,7 @@ class Astatine(object):
 
     def _setup_sql(self):
         """Creates SQLite3 database."""
-        self._conn = sqlite3.connect('{}/{}'.format(self._dirs[1], self._sql_name), check_same_thread=False)
+        self._conn = sqlite3.connect('{}'.format(self._sql_name), check_same_thread=False)
         self._cursor = self._conn.cursor()
         self.cursor = self._cursor
 
@@ -155,6 +161,40 @@ class Astatine(object):
             self.app.error_handler[code] = function
 
     @staticmethod
+    def pages_selector(total_pages, page_number, page_slots):
+        pages = []
+        current_page = page_number - 1
+        current_page_min = math.floor(current_page - math.floor(page_slots / 2))
+        current_page_max = math.ceil(current_page + math.ceil(page_slots / 2))
+
+        if current_page_max > total_pages:
+            current_page_max = total_pages
+
+        for page in range(max(0, current_page_min), current_page_max):
+            pages.append(page + 1)
+        return pages
+
+    @staticmethod
+    def format_text_to_html(text):
+        formatting = {
+            r'\*\*\*(.+?)\*\*\*': r'<strong><i>\1</i></strong>',
+            r'\_\_\_(.+?)\_\_\_': r'<strong><i>\1</i></strong>',
+            r'\*\*(.+?)\*\*': r'<strong>\1</strong>',
+            r'\_\_(.+?)\_\_': r'<strong>\1</strong>',
+            r'\*(.+?)\*': r'<i>\1</i>',
+            r'\_(.+?)\_': r'<i>\1</i>',
+            r'\~\~(.+?)\~\~': r'<span class="strikethrough">\1</span>',
+            r'\>\!(.+?)\!\<': r'<span class="spoiler">\1</span>',
+            r'\^\((.+?)\)': r'<sup>\1</sup>',
+            r'\^(.+?)\ ': r'<sup>\1 </sup>',
+            r'\`(.+?)\`': r'<code>\1</code>',
+            r'\h\t\t\p(.+?)\ ': r'<a href="\1">\1</a>'
+        }
+        for k, v in formatting.items():
+            text = re.sub(k, v, text)
+        return text
+
+    @staticmethod
     def random_string(string_length, special=False):
         letters = string.ascii_letters
         numbers = '0123456789'
@@ -164,11 +204,16 @@ class Astatine(object):
 
     def generate_uid(self, table_name, id_name, length=20):
         is_unique, new_id = False, None
-        length = length if self.uid_length is length else self.uid_length
+        off_length = length or self.uid_length
         while not is_unique:
-            new_id = self.random_string(length)
-            table = self._cursor.execute("SELECT {} FROM {} WHERE {} = ?".format(id_name, table_name, id_name), (new_id,))
-            is_unique = True if not table else False
+            new_id = self.random_string(off_length)
+            table = self._cursor.execute(f"SELECT {id_name} FROM {table_name} WHERE {id_name} = ?", (new_id,))
+            for t in table:
+                if not t:
+                    is_unique = False
+                else:
+                    is_unique = True
+            is_unique = True if not [t for t in table] else False
         return new_id
 
     @staticmethod
@@ -178,11 +223,12 @@ class Astatine(object):
 
         filepath = None
         name, ext = os.path.splitext(file.filename)
+        filename = name + ext.lower()
         if ext in extensions or extensions == '*':
             if rename:
-                filepath = path + rename + ext if path else rename + ext
+                filepath = path + rename + ext.lower() if path else rename + ext.lower()
             else:
-                filepath = path + file.filename if path else file.filename
+                filepath = path + filename if path else filename
             file.save(filepath, overwrite=overwrite)
         else:
             raise Exception('[ FILE ISSUE ] - File Extension is not allowed - {}.'.format(file.filename))
@@ -195,11 +241,12 @@ class Astatine(object):
         filepath = None
         for file in files:
             name, ext = os.path.splitext(file.filename)
+            filename = name + ext.lower()
             if ext in extensions or extensions == '*':
                 if rename:
                     filepath = path + rename + ext if path else rename + ext
                 else:
-                    filepath = path + file.filename if path else file.filename
+                    filepath = path + filename if path else filename
 
                 file.save(filepath, overwrite=overwrite)
             else:
@@ -240,20 +287,20 @@ class Astatine(object):
         :param query: The SQLite3 query you want to make
         :param values: Any values you need to pass into the SQLite3 query
         :param fetchall: Whether it should <fetchall> or <fetchone>, default is True
-        :return:
+        :return
         """
+        execution = None
         try:
             self._lock.acquire(True)
             if values:
-                execution =  self._cursor.execute(query, values).fetchall() if fetchall else self._cursor.execute(query, values).fetchone()
+                execution = self._cursor.execute(query, values).fetchall() if fetchall else self._cursor.execute(query, values).fetchone()
                 self._conn.commit()
-                return execution
             else:
                 execution = self._cursor.execute(query).fetchall() if fetchall else self._cursor.execute(query).fetchone()
                 self._conn.commit()
-                return execution
         finally:
             self._lock.release()
+            return execution
 
     def execute_many_sql(self, query, values=None, fetchall=True):
         """
@@ -343,6 +390,7 @@ class AstatineAES(object):
         return base64.b64encode(iv + cipher.encrypt(raw.encode()))
 
     def decrypt(self, enc):
+        # print(enc)
         enc = base64.b64decode(enc)
         iv = enc[:AES.block_size]
         cipher = AES.new(self.key, AES.MODE_CBC, iv)
@@ -359,31 +407,36 @@ class AstatineAES(object):
 class AstatineSMTP(object):
     """ Astatine Email Class """
 
-    def __init__(self, fromEmail, password):
-        self.toEmail = None
-        self.fromEmail = fromEmail
-        self.port = 465
-        self.smtpServer = 'smtp.gmail.com'
-        self.senderPSWD = password
+    def __init__(self, host, port, host_username, host_password, email_sender):
+        self.email_to = None
+        self.sender = email_sender
+        self.port = port
+        self.smtp_server = host
+        self.host_username = host_username
+        self.host_password = host_password
 
-    def send_message(self, receiver, subject, plain=None, html=None):
+    def send_email(self, receiver, subject, text=None, html=None):
         message = MIMEMultipart('alternative')
-        message['Subject'] = subject
-        message['From'] = self.fromEmail
+        message['From'] = self.sender
         message['To'] = receiver
-        message.add_header('Content-Type', 'text/html')
+        message['Subject'] = subject
+        message['Date'] = formatdate(localtime=True)
 
-        plain1 = MIMEText(plain, 'plain')
-        html1 = MIMEText(html, 'html')
+        if text:
+            text = MIMEText(text, 'plain')
+            message.attach(text)
 
-        message.attach(plain1)
-        message.attach(html1)
+        if html:
+            html = MIMEText(html, 'html')
+            message.attach(html)
 
-        context = ssl.create_default_context()
-
-        with smtplib.SMTP_SSL(self.smtpServer, self.port, context=context) as server:
-            server.login(self.fromEmail, self.senderPSWD)
-            server.sendmail(self.fromEmail, receiver, message.as_string())
+        with smtplib.SMTP(self.smtp_server, self.port) as server:
+            server.starttls()
+            server.login(self.host_username, self.host_password)
+            try:
+                server.sendmail(self.sender, receiver, message.as_string())
+            finally:
+                server.quit()
 
 
 class AstatineJSON(object):
