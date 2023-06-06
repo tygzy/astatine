@@ -1,5 +1,5 @@
 import base64
-import bottle_pxsession
+import lib.bottle_pxsession as bottle_pxsession
 import functools
 import hashlib
 import json
@@ -7,23 +7,21 @@ import os
 import random
 import smtplib
 import sqlite3
-import ssl
 import string
 import threading
 import math
 import re
-import dkim
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate
 
-from bottle import Bottle, static_file, abort
+from lib.bottle import Bottle, static_file, abort
 
 aes_disabled = False
 try:
-    from Crypto import Random
-    from Crypto.Cipher import AES
+    from Cryptodome import Random
+    from Cryptodome.Cipher import AES
     aes_disabled = False
 except ModuleNotFoundError:
     aes_disabled = True
@@ -102,7 +100,10 @@ class Astatine(object):
                 os.makedirs(directory)
 
     def _download_file(self, filepath) -> static_file:
-        return static_file(filepath, root="", download=filepath)
+        if filepath.split('/')[0] == 'user_data':
+            return static_file(filepath, root="", download=filepath)
+        else:
+            abort(403)
 
     def _static_files(self, filepath) -> static_file:
         name, ext = os.path.splitext(filepath)
@@ -122,7 +123,7 @@ class Astatine(object):
             all_extensions.append(i)
 
         self.app.route("/download/<filepath:path>", method='GET', callback=df)
-        self.app.route("/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
+        self.app.route("/s/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
 
     def enable_sessions(self):
         """
@@ -280,7 +281,8 @@ class Astatine(object):
                          debug=self._debug,
                          reloader=self._reload,
                          quiet=self._quiet)
-        self._end_sql()
+        if self._sql_name:
+            self._end_sql()
 
     def execute_sql(self, query, values=None, fetchall=True):
         """
@@ -330,16 +332,16 @@ class Astatine(object):
 class AstatineSQL(object):
     """ Astatine SQLite3 Class """
 
-    def __init__(self, fileName, sql_dir=None):
-        self._sqlName = fileName
-        self._sql_dir = sql_dir
+    def __init__(self, path):
+        self._path = path
         self._cursor = None
         self._conn = None
         self._lock = threading.Lock()
+        self.connect()
 
     def connect(self):
         """Creates SQLite3 database."""
-        self._conn = sqlite3.connect('{}/{}'.format(self._sql_dir, self._sqlName), check_same_thread=False)
+        self._conn = sqlite3.connect('{}'.format(self._path), check_same_thread=False)
         self._cursor = self._conn.cursor()
 
     def commit(self):
@@ -355,20 +357,43 @@ class AstatineSQL(object):
         :param fetchall: Whether it should <fetchall> or <fetchone>
         :return:
         """
+        execution = None
         try:
             self._lock.acquire(True)
             if values:
-                return self._cursor.execute(query, values).fetchall() if fetchall else self._cursor.execute(
-                    query, values).fetchone()
+                execution = self._cursor.execute(query, values).fetchall() if fetchall else self._cursor.execute(query, values).fetchone()
+                self._conn.commit()
             else:
-                return self._cursor.execute(query).fetchall() if fetchall else self._cursor.execute(
-                    query).fetchone()
+                execution = self._cursor.execute(query).fetchall() if fetchall else self._cursor.execute(query).fetchone()
+                self._conn.commit()
         finally:
             self._lock.release()
+            return execution
 
-    def function_SQL(self, name, parameters, callback):
+    def create_function_sql(self, name, parameters, callback):
         sqlite3.enable_callback_tracebacks(True)
         self._conn.create_function(name, parameters, callback)
+
+    @staticmethod
+    def random_string(string_length, special=False):
+        letters = string.ascii_letters
+        numbers = '0123456789'
+        specials = '!£$%&*;:@~#<>,./?'
+        combo = numbers + letters + specials if special else numbers + letters
+        return ''.join(random.choice(combo) for i in range(string_length))
+
+    def generate_uid(self, table_name, id_name, length=20):
+        is_unique, new_id = False, None
+        while not is_unique:
+            new_id = self.random_string(length)
+            table = self._cursor.execute(f"SELECT {id_name} FROM {table_name} WHERE {id_name} = ?", (new_id,))
+            for t in table:
+                if not t:
+                    is_unique = False
+                else:
+                    is_unique = True
+            is_unique = True if not [t for t in table] else False
+        return new_id
 
 
 class AstatineAES(object):
@@ -437,6 +462,9 @@ class AstatineSMTP(object):
                 server.sendmail(self.sender, receiver, message.as_string())
             finally:
                 server.quit()
+
+    def set_sender(self, sender):
+        self.sender = sender
 
 
 class AstatineJSON(object):
