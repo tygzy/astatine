@@ -1,72 +1,41 @@
-# Astatine API
+# astatine
 
-Made by __tygzy__ - [https://github.com/tygzy](https://github.com/tygzy)
+Bottle framework to allow use with classes as well as providing extra functionality, this makes making a website with Bottle a lot faster.
 
-## A class for the Bottle API to reduce clutter and difficulty while creating a website.
+How to use astatine:
 
-### Summary of features:
+```py
+from astatine import Astatine
+from bottle import template
 
-- When adding a file to your html file e.g. CSS you only need to provide the filepath past the 'css' directory,
-if the css file is in that main directory you only need to provide the file name.
-    - This is the same if you use a file inside your CSS e.g. an svg reference you only need to provide the file name unless the file is embedded further in the directory.
-    - This is also the case for other file types such as `.js .css .scss .svg .jpg .png .ttf .eot .ttf .woff .woff2`.
-- All basic website directories will be made when you call the class for the first time if the directories don't already exist.
-- To use sessions(cookies) the 'enable_sessions()' function, this needs to be called otherwise sessions won't be enabled.
-- For allowing a user to download a file make a link with the route '/download/<filename>'.
-- When uploading a file to the web server, it will automatically upload to `/views/data`.
-- The base class also allows the use of SQLite3 with ease, requiring no setup, just use the `modify_SQL()` and `return_SQL()` functions to interact with your database.
-- A function that allows the creation of a UUID, which checks in a provided table whether that UUID already exists to make sure it is unique.
-
-## Examples
-
-```
 class Website(object):
+
     def __init__(self):
-        debug = True
-        reload = True
-        port = 8080
-        host = "localhost"
-        self.astatine = Astatine(host, port, debug, reload)
-        self.astatine.enable_sessions()
-        self.create_routes()
+        self.astatine = Astatine('localhost', 8080, True, True, 'server', True, 'data.db') # initialize class
+
+        self.astatine.enable_sessions() # enable cookies / sessions, not required to create a website
+        self.create_routes() 
 
     def create_routes(self):
-        self.astatine.add_route('/', 'GET', self.index, True)
-        self.astatine.add_error_handler(404, self.error_page)
+        self.astatine.route('/', 'get', self.index, True) # create a route and link it to a function
+        
+        self.astatine.error(404, self.error) # create an error page and link it to a function
 
     def index(self, session):
-        return template('html/index.tpl', session=session)
-
-    def error_page(self, error):
-        return "<h1>404 Error!</h1>"
+        return template('html/index.html')
+    
+    def error(self, code):
+        return template('html/error.tpl', code=code)
 
 if __name__ == '__main__':
     web = Website()
-    web.astatine.run_astatine()
+    web.astatine.run_astatine() # run bottle with a built-in astatine function
 ```
 
-__This will create a basic website with an index page and also handle a 404 error__, which may seem like a lot of code, but this allows much easier code writing further on in development. With using static files, interacting with a database, using sessions and uploading files.
+This will create a website with an index page and an error handler.
 
-Error handling.
-
-```
-# You can use this:
-self.astatine.add_error_handler(404, self.error_page)
-
-# Or this to handle multiple kinds of errors all in one function
-self.astatine.add_error_handler([400, 401, 402, 403, 404], self.error_page)
-```
-
-The two methods of interacting with an SQLite3 database.
-
-```
-results = self.astatine.return_SQL("SELECT * FROM table WHERE NOT id = ? LIMIT 3", (1,))
-
-self.astatine.modify_SQL("INSERT INTO table (id, name, age) VALUES (?,?,?)", (1, "tygzy", 18))
-```
-
-How to upload a file using Bottle Base API.
-
-```
-self.astatine.upload_file(bottle_file=file, allowed_exts=('.jpg', '.png'), file_dir='img/', overwrite=True)
-```
+Astatine also offers many other functions to make the process of creating a website easier, 
+such as file uploads and downloads, static files.
+There are also 4 other classes alongside the main Bottle class, one for AES, 
+to encrypt things such as passwords, an SMTP class, 
+JSON class and a separate SQLite class, to allow multiple sqlite databases on a singular website.
