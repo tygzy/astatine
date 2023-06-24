@@ -26,8 +26,6 @@ try:
 except ModuleNotFoundError:
     aes_disabled = True
 
-sqlDir = '/views/sql'
-
 
 class Astatine(object):
     """
@@ -53,12 +51,12 @@ class Astatine(object):
         self._cursor = None
         self._sql_name = sql_name
         self._dirs = ['views/', 'views/css/',  'views/svg/',
-                      'views/js/', 'views/data/', 'views/fnt/', 'views/img/',
-                      'user_data/']
+                      'views/js/', 'views/data/', 'views/img/',
+                      'user_data/', 'lib/', 'views/html/', 'views/email/', 'sql/']
         self._plugin_manager = None
         self._session_plugin = None
         self._lock = threading.Lock()
-        self._days = 100
+        self._days = 365
         self._hours = 24
         self._minutes = 60
         self._seconds = 60
@@ -66,7 +64,6 @@ class Astatine(object):
         self.ss = None
         self.cursor = self._cursor
         self.has_sessions = False
-        self.uid_length = 20
 
         self._static_files_ext = ['css', 'scss', 'less', 'png', 'jpg', 'jpeg', 'gif', 'tiff',
                                   'psd', 'raw', 'svg', 'ico', 'js', 'otf', 'ttf', 'eot', 'woff', 'woff2']
@@ -112,15 +109,13 @@ class Astatine(object):
             favicon = True if ext[1:] == 'ico' else False
             return static_file(filepath, '') if not favicon else static_file(filepath, '', mimetype='image/x-icon')
         else:
-            print('Error 404: Could not find file "{}"'.format(filepath))
+            abort(404)
 
     def _route(self):
         static_files = functools.partial(self._static_files, filepath='filepath')
         df = functools.partial(self._download_file, filepath='filepath')
 
-        all_extensions = []
-        for i in self._static_files_ext:
-            all_extensions.append(i)
+        all_extensions = [i for i in self._static_files_ext]
 
         self.app.route("/download/<filepath:path>", method='GET', callback=df)
         self.app.route("/s/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
@@ -176,7 +171,12 @@ class Astatine(object):
         return pages
 
     @staticmethod
-    def format_text_to_html(text):
+    def mkdn_to_mkup(text):
+        """
+        Convert markdown to markup
+        :param text: text to convert
+        :return:
+        """
         formatting = {
             r'\*\*\*(.+?)\*\*\*': r'<strong><i>\1</i></strong>',
             r'\_\_\_(.+?)\_\_\_': r'<strong><i>\1</i></strong>',
@@ -197,25 +197,16 @@ class Astatine(object):
 
     @staticmethod
     def random_string(string_length, special=False):
-        letters = string.ascii_letters
-        numbers = '0123456789'
-        specials = '!£$%&*;:@~#<>,./?'
-        combo = numbers + letters + specials if special else numbers + letters
+        combo = string.digits + string.ascii_letters + string.punctuation if special else string.digits + string.ascii_letters
         return ''.join(random.choice(combo) for i in range(string_length))
 
     def generate_uid(self, table_name, id_name, length=20):
-        is_unique, new_id = False, None
-        off_length = length or self.uid_length
+        is_unique, uid = False, None
         while not is_unique:
-            new_id = self.random_string(off_length)
-            table = self._cursor.execute(f"SELECT {id_name} FROM {table_name} WHERE {id_name} = ?", (new_id,))
-            for t in table:
-                if not t:
-                    is_unique = False
-                else:
-                    is_unique = True
-            is_unique = True if not [t for t in table] else False
-        return new_id
+            uid = self.random_string(length)
+            table = self._cursor.execute(f'SELECT {id_name} FROM {table_name} WHERE {id_name} = ?', (uid,)).fetchone()
+            is_unique = True if not table else False
+        return uid
 
     @staticmethod
     def upload_file(file, extensions, path, overwrite=False, rename=None):
@@ -226,10 +217,8 @@ class Astatine(object):
         name, ext = os.path.splitext(file.filename)
         filename = name + ext.lower()
         if ext in extensions or extensions == '*':
-            if rename:
-                filepath = path + rename + ext.lower() if path else rename + ext.lower()
-            else:
-                filepath = path + filename if path else filename
+            filepath = path + (rename if rename else None) + ext.lower() \
+                if path else (rename if rename else None) + ext.lower()
             file.save(filepath, overwrite=overwrite)
         else:
             raise Exception('[ FILE ISSUE ] - File Extension is not allowed - {}.'.format(file.filename))
@@ -244,25 +233,20 @@ class Astatine(object):
             name, ext = os.path.splitext(file.filename)
             filename = name + ext.lower()
             if ext in extensions or extensions == '*':
-                if rename:
-                    filepath = path + rename + ext if path else rename + ext
-                else:
-                    filepath = path + filename if path else filename
+
+                filepath = path + (rename if rename else None) + ext.lower() \
+                    if path else (rename if rename else None) + ext.lower()
 
                 file.save(filepath, overwrite=overwrite)
             else:
-                raise Exception('[ FILE ISSUE ] - File Extension is not allowed - {}.'.format(file.filename))
+                abort(400)
 
     @staticmethod
-    def remove_file(file_name):
-        os.remove(str(file_name))
-
-    @staticmethod
-    def check_type(var, var_type):
-        if isinstance(var, var_type):
+    def check_type(var, var_type: type):
+        if var_type(var):
             return var
         else:
-            abort(422)
+            abort(400)
 
     def run_astatine(self):
         """
@@ -376,24 +360,16 @@ class AstatineSQL(object):
 
     @staticmethod
     def random_string(string_length, special=False):
-        letters = string.ascii_letters
-        numbers = '0123456789'
-        specials = '!£$%&*;:@~#<>,./?'
-        combo = numbers + letters + specials if special else numbers + letters
+        combo = string.digits + string.ascii_letters + string.punctuation if special else string.digits + string.ascii_letters
         return ''.join(random.choice(combo) for i in range(string_length))
 
     def generate_uid(self, table_name, id_name, length=20):
-        is_unique, new_id = False, None
+        is_unique, uid = False, None
         while not is_unique:
-            new_id = self.random_string(length)
-            table = self._cursor.execute(f"SELECT {id_name} FROM {table_name} WHERE {id_name} = ?", (new_id,))
-            for t in table:
-                if not t:
-                    is_unique = False
-                else:
-                    is_unique = True
-            is_unique = True if not [t for t in table] else False
-        return new_id
+            uid = self.random_string(length)
+            table = self._cursor.execute(f'SELECT {id_name} FROM {table_name} WHERE {id_name} = ?', (uid,)).fetchone()
+            is_unique = True if not table else False
+        return uid
 
 
 class AstatineAES(object):
@@ -415,7 +391,6 @@ class AstatineAES(object):
         return base64.b64encode(iv + cipher.encrypt(raw.encode()))
 
     def decrypt(self, enc):
-        # print(enc)
         enc = base64.b64decode(enc)
         iv = enc[:AES.block_size]
         cipher = AES.new(self.key, AES.MODE_CBC, iv)
