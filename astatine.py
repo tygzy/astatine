@@ -1,22 +1,8 @@
 import base64
 import lib.bottle_pxsession as bottle_pxsession
-import functools
-import hashlib
-import json
-import os
-import random
-import smtplib
-import sqlite3
-import string
-import threading
-import math
-import re
+import subprocess, threading, string, sqlite3, random, os, json, hashlib, functools
 
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.utils import formatdate
-
-from lib.bottle import Bottle, static_file, abort
+from lib.bottle import Bottle, static_file, abort, request, redirect
 
 aes_disabled = False
 try:
@@ -25,6 +11,8 @@ try:
     aes_disabled = False
 except ModuleNotFoundError:
     aes_disabled = True
+
+sqlDir = '/views/sql'
 
 
 class Astatine(object):
@@ -51,12 +39,12 @@ class Astatine(object):
         self._cursor = None
         self._sql_name = sql_name
         self._dirs = ['views/', 'views/css/',  'views/svg/',
-                      'views/js/', 'views/data/', 'views/img/',
-                      'user_data/', 'lib/', 'views/html/', 'views/email/', 'sql/']
+                      'views/js/', 'views/data/', 'views/fnt/', 'views/img/',
+                      'user_data/']
         self._plugin_manager = None
         self._session_plugin = None
         self._lock = threading.Lock()
-        self._days = 365
+        self._days = 100
         self._hours = 24
         self._minutes = 60
         self._seconds = 60
@@ -64,9 +52,12 @@ class Astatine(object):
         self.ss = None
         self.cursor = self._cursor
         self.has_sessions = False
+        self.uid_length = 20
 
         self._static_files_ext = ['css', 'scss', 'less', 'png', 'jpg', 'jpeg', 'gif', 'tiff',
-                                  'psd', 'raw', 'svg', 'ico', 'js', 'otf', 'ttf', 'eot', 'woff', 'woff2']
+                                  'psd', 'raw', 'svg', 'ico', 'js', 'otf', 'ttf', 'eot', 'webp',
+                                  'woff', 'woff2', 'mp4', 'mov', 'wmv', 'avi', 'mkv', 'mpeg-2', 'webm',
+                                  'mp3', 'wav', 'ogg', 'pdf']
         self._image_ext = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', '']
 
         if self._sql_name:
@@ -109,15 +100,17 @@ class Astatine(object):
             favicon = True if ext[1:] == 'ico' else False
             return static_file(filepath, '') if not favicon else static_file(filepath, '', mimetype='image/x-icon')
         else:
-            abort(404)
+            print('Error 404: Could not find file "{}"'.format(filepath))
 
     def _route(self):
         static_files = functools.partial(self._static_files, filepath='filepath')
         df = functools.partial(self._download_file, filepath='filepath')
 
-        all_extensions = [i for i in self._static_files_ext]
+        all_extensions = []
+        for i in self._static_files_ext:
+            all_extensions.append(i)
 
-        self.app.route("/download/<filepath:path>", method='GET', callback=df)
+        # self.app.route("/download/<filepath:path>", method='GET', callback=df)
         self.app.route("/s/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
 
     def enable_sessions(self):
@@ -129,7 +122,7 @@ class Astatine(object):
         self.ss = self.app.install(self._session_plugin)
         self.has_sessions = True
 
-    def route(self, name, method, function, sessions=False, args=None):
+    def route(self, name, method, function, sessions=False, **kwargs):
         """
         :param name: The route/name
         :param method: 'GET', 'PUT', 'DELETE' or 'POST'
@@ -138,7 +131,7 @@ class Astatine(object):
         :param args: provide extra arguments to the function.
         :return:
         """
-        fn = functools.partial(function, args) if args else function
+        fn = functools.partial(function, kwargs) if kwargs else function
         if not sessions:
             self.app.route(name, method=method, callback=fn)
         elif sessions and self.has_sessions:
@@ -157,96 +150,77 @@ class Astatine(object):
             self.app.error_handler[code] = function
 
     @staticmethod
-    def pages_selector(total_pages, page_number, page_slots):
-        pages = []
-        current_page = page_number - 1
-        current_page_min = math.floor(current_page - math.floor(page_slots / 2))
-        current_page_max = math.ceil(current_page + math.ceil(page_slots / 2))
-
-        if current_page_max > total_pages:
-            current_page_max = total_pages
-
-        for page in range(max(0, current_page_min), current_page_max):
-            pages.append(page + 1)
-        return pages
-
-    @staticmethod
-    def mkdn_to_mkup(text):
-        """
-        Convert markdown to markup
-        :param text: text to convert
-        :return:
-        """
-        formatting = {
-            r'\*\*\*(.+?)\*\*\*': r'<strong><i>\1</i></strong>',
-            r'\_\_\_(.+?)\_\_\_': r'<strong><i>\1</i></strong>',
-            r'\*\*(.+?)\*\*': r'<strong>\1</strong>',
-            r'\_\_(.+?)\_\_': r'<strong>\1</strong>',
-            r'\*(.+?)\*': r'<i>\1</i>',
-            r'\_(.+?)\_': r'<i>\1</i>',
-            r'\~\~(.+?)\~\~': r'<span class="strikethrough">\1</span>',
-            r'\>\!(.+?)\!\<': r'<span class="spoiler">\1</span>',
-            r'\^\((.+?)\)': r'<sup>\1</sup>',
-            r'\^(.+?)\ ': r'<sup>\1 </sup>',
-            r'\`(.+?)\`': r'<code>\1</code>',
-            r'\h\t\t\p(.+?)\ ': r'<a href="\1">\1</a>'
-        }
-        for k, v in formatting.items():
-            text = re.sub(k, v, text)
-        return text
-
-    @staticmethod
     def random_string(string_length, special=False):
-        combo = string.digits + string.ascii_letters + string.punctuation if special else string.digits + string.ascii_letters
+        letters = string.ascii_letters
+        numbers = string.digits
+        specials = '!£$%&*;:@~#<>,./?'
+        combo = numbers + letters + specials if special else numbers + letters
         return ''.join(random.choice(combo) for i in range(string_length))
 
     def generate_uid(self, table_name, id_name, length=20):
-        is_unique, uid = False, None
+        is_unique, new_id = False, None
+        off_length = length or self.uid_length
         while not is_unique:
-            uid = self.random_string(length)
-            table = self._cursor.execute(f'SELECT {id_name} FROM {table_name} WHERE {id_name} = ?', (uid,)).fetchone()
-            is_unique = True if not table else False
-        return uid
+            new_id = self.random_string(off_length)
+            table = self._cursor.execute(f"SELECT {id_name} FROM {table_name} WHERE {id_name} = ?", (new_id,))
+            for t in table:
+                if not t:
+                    is_unique = False
+                else:
+                    is_unique = True
+            is_unique = True if not [t for t in table] else False
+        return new_id
 
     @staticmethod
-    def upload_file(file, extensions, path, overwrite=False, rename=None):
+    def upload_files(files, extensions, path, max_file_size=52428800, rename=None):
+        """
+        :param files: A list of the files
+        :param extensions: Any list of extensions or '*' to allow any
+        :param path: The path the file will be saved to.
+        :param max_file_size: The maximum file size per file.
+        :param rename: provide extra arguments to the function.
+        :return:
+        """
         if not os.path.exists(path):
             os.makedirs(path)
 
-        filepath = None
-        name, ext = os.path.splitext(file.filename)
-        filename = name + ext.lower()
-        if ext in extensions or extensions == '*':
-            filepath = path + (rename if rename else None) + ext.lower() \
-                if path else (rename if rename else None) + ext.lower()
-            file.save(filepath, overwrite=overwrite)
-        else:
-            raise Exception('[ FILE ISSUE ] - File Extension is not allowed - {}.'.format(file.filename))
+        FILEPATH = None
+        BUF_SIZE = 8192
+
+        try:
+            for file in files:
+                name, ext = os.path.splitext(file.filename)
+                filename = name + ext.lower()
+                if ext in extensions or extensions == '*':
+                    if rename:
+                        FILEPATH = path + rename + ext if path else rename + ext
+                    else:
+                        FILEPATH = path + filename if path else filename
+                    byte_count = 0
+                    data_blocks = []
+                    buf = file.file.read(BUF_SIZE)
+                    while buf:
+                        byte_count += len(buf)
+                        if byte_count > max_file_size:
+                            abort(413)
+                        data_blocks.append(buf)
+                        buf = file.file.read(BUF_SIZE)
+                    data = b''.join(data_blocks)
+                    with open(FILEPATH, 'wb') as f:
+                        f.write(data)
+        except IOError:
+            redirect(request.environ['HTTP_REFERER'])
 
     @staticmethod
-    def upload_files(files, extensions, path, overwrite=False, rename=None):
-        if not os.path.exists(path):
-            os.makedirs(path)
-
-        filepath = None
-        for file in files:
-            name, ext = os.path.splitext(file.filename)
-            filename = name + ext.lower()
-            if ext in extensions or extensions == '*':
-
-                filepath = path + (rename if rename else None) + ext.lower() \
-                    if path else (rename if rename else None) + ext.lower()
-
-                file.save(filepath, overwrite=overwrite)
-            else:
-                abort(400)
+    def remove_file(file_name):
+        os.remove(str(file_name))
 
     @staticmethod
-    def check_type(var, var_type: type):
-        if var_type(var):
+    def check_type(var, var_type):
+        if isinstance(var, var_type):
             return var
         else:
-            abort(400)
+            abort(422)
 
     def run_astatine(self):
         """
@@ -287,26 +261,6 @@ class Astatine(object):
         finally:
             self._lock.release()
             return execution
-
-    def execute_many_sql(self, query, values=None, fetchall=True):
-        """
-        :param query: The SQLite3 query you want to make
-        :param values: Any values you need to pass into the SQLite3 query
-        :param fetchall: Whether it should <fetchall> or <fetchone>, default is True
-        :return:
-        """
-        try:
-            self._lock.acquire(True)
-            if values:
-                execution = self._cursor.executemany(query, values).fetchall() if fetchall else self._cursor.executemany(query, values).fetchone()
-                self._conn.commit()
-                return execution
-            else:
-                execution = self._cursor.executemany(query).fetchall() if fetchall else self._cursor.executemany(query).fetchone()
-                self._conn.commit()
-                return execution
-        finally:
-            self._lock.release()
 
     def create_function_sql(self, name, parameters, callback):
         sqlite3.enable_callback_tracebacks(True)
@@ -360,16 +314,22 @@ class AstatineSQL(object):
 
     @staticmethod
     def random_string(string_length, special=False):
-        combo = string.digits + string.ascii_letters + string.punctuation if special else string.digits + string.ascii_letters
+        specials = '!£$%&*;:@~#<>,./?'
+        combo = string.ascii_letters + string.digits + (specials if special else None)
         return ''.join(random.choice(combo) for i in range(string_length))
 
     def generate_uid(self, table_name, id_name, length=20):
-        is_unique, uid = False, None
+        is_unique, new_id = False, None
         while not is_unique:
-            uid = self.random_string(length)
-            table = self._cursor.execute(f'SELECT {id_name} FROM {table_name} WHERE {id_name} = ?', (uid,)).fetchone()
-            is_unique = True if not table else False
-        return uid
+            new_id = self.random_string(length)
+            table = self._cursor.execute(f"SELECT {id_name} FROM {table_name} WHERE {id_name} = ?", (new_id,))
+            for t in table:
+                if not t:
+                    is_unique = False
+                else:
+                    is_unique = True
+            is_unique = True if not [t for t in table] else False
+        return new_id
 
 
 class AstatineAES(object):
@@ -391,6 +351,7 @@ class AstatineAES(object):
         return base64.b64encode(iv + cipher.encrypt(raw.encode()))
 
     def decrypt(self, enc):
+        # print(enc)
         enc = base64.b64decode(enc)
         iv = enc[:AES.block_size]
         cipher = AES.new(self.key, AES.MODE_CBC, iv)
@@ -415,28 +376,8 @@ class AstatineSMTP(object):
         self.host_username = host_username
         self.host_password = host_password
 
-    def send_email(self, receiver, subject, text=None, html=None):
-        message = MIMEMultipart('alternative')
-        message['From'] = self.sender
-        message['To'] = receiver
-        message['Subject'] = subject
-        message['Date'] = formatdate(localtime=True)
-
-        if text:
-            text = MIMEText(text, 'plain')
-            message.attach(text)
-
-        if html:
-            html = MIMEText(html, 'html')
-            message.attach(html)
-
-        with smtplib.SMTP(self.smtp_server, self.port) as server:
-            server.starttls()
-            server.login(self.host_username, self.host_password)
-            try:
-                server.sendmail(self.sender, receiver, message.as_string())
-            finally:
-                server.quit()
+    def send_email(self, receiver, subject, content=None):
+        subprocess.run(['mail', '--content-type=text/html', '-s', subject, '-r', self.sender, receiver,], input=content, text=True)
 
     def set_sender(self, sender):
         self.sender = sender
