@@ -368,13 +368,9 @@ class AstatineAES(object):
 class AstatineSMTP(object):
     """ Astatine Email Class """
 
-    def __init__(self, host, port, host_username, host_password, email_sender):
+    def __init__(self, sender):
         self.email_to = None
-        self.sender = email_sender
-        self.port = port
-        self.smtp_server = host
-        self.host_username = host_username
-        self.host_password = host_password
+        self.sender = sender
 
     def send_email(self, receiver, subject, content=None):
         subprocess.run(['mail', '--content-type=text/html', '-s', subject, '-r', self.sender, receiver,], input=content, text=True)
