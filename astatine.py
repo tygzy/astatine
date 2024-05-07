@@ -1,6 +1,7 @@
 import base64
 import lib.bottle_pxsession as bottle_pxsession
-import subprocess, threading, string, sqlite3, random, os, json, hashlib, functools
+import subprocess, threading, string, sqlite3, random, os, json, hashlib, functools, hashlib, datetime
+from urllib.parse import urlparse
 
 from lib.bottle import Bottle, static_file, abort, request, redirect
 
@@ -40,7 +41,7 @@ class Astatine(object):
         self._sql_name = sql_name
         self._dirs = ['views/', 'views/css/',  'views/svg/',
                       'views/js/', 'views/data/', 'views/fnt/', 'views/img/',
-                      'user_data/']
+                      'user_data/', 'db/']
         self._plugin_manager = None
         self._session_plugin = None
         self._lock = threading.Lock()
@@ -53,6 +54,8 @@ class Astatine(object):
         self.cursor = self._cursor
         self.has_sessions = False
         self.uid_length = 20
+        self._db = None
+        self._db_c = None
 
         self._static_files_ext = ['css', 'scss', 'less', 'png', 'jpg', 'jpeg', 'gif', 'tiff',
                                   'psd', 'raw', 'svg', 'ico', 'js', 'otf', 'ttf', 'eot', 'webp',
@@ -64,6 +67,7 @@ class Astatine(object):
             self._setup_sql()
         self.app = Bottle()
         self._setup_astatine()
+        self._setup_db()
         self._route()
 
     def __contains__(self, route):
@@ -77,6 +81,38 @@ class Astatine(object):
         self._conn = sqlite3.connect('{}'.format(self._sql_name), check_same_thread=False)
         self._cursor = self._conn.cursor()
         self.cursor = self._cursor
+
+    def _setup_db(self):
+        self._db = sqlite3.connect('db/site_data.db', check_same_thread=False)
+        self._db_c = self._db.cursor()
+        self._db_c.execute('''
+            CREATE TABLE IF NOT EXISTS ip_bans (
+                uid TEXT PRIMARY KEY UNIQUE NOT NULL,
+                ip_hash TEXT UNIQUE NOT NULL
+            )
+        ''')
+        self._db_c.execute('''
+            CREATE TABLE IF NOT EXISTS visitors (
+                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
+                datetime INTEGER NOT NULL,
+                visits INTEGER NOT NULL DEFAULT 0
+            )
+        ''')
+        self._db_c.execute('''
+            CREATE TABLE IF NOT EXISTS unique_visitors (
+                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
+                datetime INTEGER NOT NULL,
+                visits INTEGER NOT NULL DEFAULT 0
+            )
+        ''')
+        self._db_c.execute('''
+            CREATE TABLE IF NOT EXISTS visitor_referral (
+                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
+                datetime INTEGER NOT NULL,
+                referral TEXT NOT NULL,
+                visits INTEGER NOT NULL DEFAULT 0
+            )
+        ''')
 
     def _end_sql(self):
         self._conn.commit()
@@ -112,6 +148,53 @@ class Astatine(object):
 
         # self.app.route("/download/<filepath:path>", method='GET', callback=df)
         self.app.route("/s/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
+
+    def track_visitor(self, session):
+        # checking if ip is banned
+        target_ip = request.environ.get('HTTP_X_FORWARDED_FOR') or request.environ.get('REMOTE_ADDR')
+        hashed_ip = hashlib.sha256(bytes(target_ip, 'utf-8')).hexdigest()
+
+        if self._db_c.execute('SELECT TRUE FROM ip_bans WHERE ip_hash = ?', (hashed_ip,)).fetchone()[0]:
+            abort(403)
+
+        date_current = datetime.datetime.now().timestamp()
+        date_start = datetime.datetime.combine(datetime.datetime.now(), datetime.time.min).timestamp()
+
+        check_date_start = self._db_c.execute('SELECT * FROM visitors WHERE datetime = ?', (int(date_start),))
+
+        if urlparse(request.environ.get('HTTP_REFERER')).netloc not in ['tyler.contact', 'www.tyler.contact', 'localhost:8080']:
+            if not check_date_start:
+                self._db_c.execute('''
+                    INSERT INTO visitor_referral (uid, datetime, referral, visits) VALUES (?,?,?,?)
+                ''', (self.random_string(8), int(date_start), request.environ.get('HTTP_REFERER'), 1))
+            else:
+                if session['last_visit'] and session['last_visit'] < date_start:
+                    self._db_c.execute('''
+                        UPDATE visitor_referral SET visits = visits + 1 WHERE datetime = ? AND referral = ?
+                    ''', (int(date_start), request.environ.get('HTTP_REFERER')))
+                else:
+                    self._db_c.execute('''
+                        UPDATE visitor_referral SET visits = visits + 1 WHERE datetime = ? AND referral = ?
+                    ''', (int(date_start), request.environ.get('HTTP_REFERER')))
+
+        if not session['last_visit']:
+            self._db_c.execute('''UPDATE unique_visitors SET visits = visits + 1''')
+
+        if not check_date_start:
+            self._db_c.execute('''
+                INSERT INTO visitors (uid, datetime, visits) VALUES (?,?,?)
+            ''', (self.generate_uid('visit_stats', 'uid'), int(date_start), 1))
+        else:
+            if session['last_visit'] and session['last_visit'] < date_start:
+                self._db_c.execute('''
+                    UPDATE visitors SET visits = visits + 1 WHERE datetime = ?
+                ''', (int(date_start),))
+            else:
+                self._db_c.execute('''
+                    UPDATE visitors SET visits = visits + 1 WHERE datetime = ?
+                ''', (int(date_start),))
+
+        session['last_visit'] = date_current
 
     def enable_sessions(self):
         """
@@ -215,6 +298,11 @@ class Astatine(object):
     def remove_file(file_name):
         os.remove(str(file_name))
 
+    def ip_ban(self, ip=None):
+        target_ip = ip if ip else request.environ.get('HTTP_X_FORWARDED_FOR') or request.environ.get('REMOTE_ADDR')
+        hashed_ip = hashlib.sha256(bytes(target_ip, 'utf-8')).hexdigest()
+        self._db_c.execute('INSERT INTO ip_bans (uid, ip_hash) VALUES (?,?)', (self.random_string(8), hashed_ip))
+
     @staticmethod
     def check_type(var, var_type):
         if isinstance(var, var_type):
@@ -226,21 +314,24 @@ class Astatine(object):
         """
         Run the bottle website.
         """
-        if self._server:
-            self.app.run(host=self._host,
-                         port=self._port,
-                         debug=self._debug,
-                         reloader=self._reload,
-                         server=self._server,
-                         quiet=self._quiet)
-        else:
-            self.app.run(host=self._host,
-                         port=self._port,
-                         debug=self._debug,
-                         reloader=self._reload,
-                         quiet=self._quiet)
-        if self._sql_name:
-            self._end_sql()
+        try:
+            if self._server:
+                self.app.run(host=self._host,
+                             port=self._port,
+                             debug=self._debug,
+                             reloader=self._reload,
+                             server=self._server,
+                             quiet=self._quiet)
+            else:
+                self.app.run(host=self._host,
+                             port=self._port,
+                             debug=self._debug,
+                             reloader=self._reload,
+                             quiet=self._quiet)
+        finally:
+            if self._sql_name:
+                self._end_sql()
+            self._db.commit()
 
     def execute_sql(self, query, values=None, fetchall=True):
         """
