@@ -1,485 +1,429 @@
-import base64
-import lib.bottle_pxsession as bottle_pxsession
-import subprocess, threading, string, sqlite3, random, os, json, hashlib, functools, hashlib, datetime
-from urllib.parse import urlparse
+import datetime
+import os
 
-from lib.bottle import Bottle, static_file, abort, request, redirect
-
-aes_disabled = False
-try:
-    from Cryptodome import Random
-    from Cryptodome.Cipher import AES
-    aes_disabled = False
-except ModuleNotFoundError:
-    aes_disabled = True
-
-sqlDir = '/views/sql'
+from lib.astatine import Astatine, AstatineJSON, AstatineSQL, AstatineAES, AstatineSMTP
+from lib.bottle import template, request, abort, redirect
+import re
 
 
-class Astatine(object):
-    """
-    bottle mini framework to allow bottle to be used in a class with useful functions implemented to be used easily
+class Mercury(object):
 
-    Information:
-        - static files are already implemented into astatine
-        - uploading files with different conditions is now a single function, e.g. renaming or overwriting
-        - default directories are created on first start of the server
-        - downloading files is implemented
-        - easily define routes and error pages
-        - check a value type and throw code 422 if it isn't the desired type, to be used on form values
-        - sqlite functionality
-    """
+    def __init__(self):
+        self.aj = AstatineJSON('data.json')
 
-    def __init__(self, host='localhost', port=8080, debug=True, reload=False, server=None, quiet=None, sql_name=None):
-        self._port = port
-        self._host = host
-        self._debug = debug
-        self._reload = reload
-        self._server = server
-        self._quiet = quiet
-        self._cursor = None
-        self._sql_name = sql_name
-        self._dirs = ['views/', 'views/css/',  'views/svg/',
-                      'views/js/', 'views/data/', 'views/fnt/', 'views/img/',
-                      'user_data/', 'db/']
-        self._plugin_manager = None
-        self._session_plugin = None
-        self._lock = threading.Lock()
-        self._days = 100
-        self._hours = 24
-        self._minutes = 60
-        self._seconds = 60
-        self._life = self._days * self._hours * self._minutes * self._seconds
-        self.ss = None
-        self.cursor = self._cursor
-        self.has_sessions = False
-        self.uid_length = 20
-        self._db = None
-        self._db_c = None
+        self.server_settings = self.aj.read()['server_settings']
+        self.email_settings = self.aj.read()['email_settings']
+        self.error_codes = self.aj.read()['error_codes']
 
-        self._static_files_ext = ['css', 'scss', 'less', 'png', 'jpg', 'jpeg', 'gif', 'tiff',
-                                  'psd', 'raw', 'svg', 'ico', 'js', 'otf', 'ttf', 'eot', 'webp',
-                                  'woff', 'woff2', 'mp4', 'mov', 'wmv', 'avi', 'mkv', 'mpeg-2', 'webm',
-                                  'mp3', 'wav', 'ogg', 'pdf']
-        self._image_ext = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', '']
+        self.spam = self.aj.read()['spam']
 
-        if self._sql_name:
-            self._setup_sql()
-        self.app = Bottle()
-        self._setup_astatine()
-        self._setup_db()
-        self._route()
+        debug = self.server_settings['debug']
+        reload = self.server_settings['reload']
+        port = self.server_settings['port']
+        host = self.server_settings['host']
+        quiet = self.server_settings['quiet']
+        server = self.server_settings['server']
 
-    def __contains__(self, route):
-        if route in self.app.routes:
-            return True
-        else:
-            return False
+        self.astatine = Astatine(host, port, debug, reload, server, quiet, 'sql/data.db')
+        self.aes = AstatineAES('987xg12kghIKasx87hYUGI7b09zxb')
 
-    def _setup_sql(self):
-        """Creates SQLite3 database."""
-        self._conn = sqlite3.connect('{}'.format(self._sql_name), check_same_thread=False)
-        self._cursor = self._conn.cursor()
-        self.cursor = self._cursor
+        self.astatine.enable_sessions()
+        self.create_routes()
 
-    def _setup_db(self):
-        self._db = sqlite3.connect('db/site_data.db', check_same_thread=False)
-        self._db_c = self._db.cursor()
-        self._db_c.execute('''
-            CREATE TABLE IF NOT EXISTS ip_bans (
-                uid TEXT PRIMARY KEY UNIQUE NOT NULL,
-                ip_hash TEXT UNIQUE NOT NULL
-            )
-        ''')
-        self._db_c.execute('''
-            CREATE TABLE IF NOT EXISTS visitors (
-                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
-                datetime INTEGER NOT NULL,
-                visits INTEGER NOT NULL DEFAULT 0
-            )
-        ''')
-        self._db_c.execute('''
-            CREATE TABLE IF NOT EXISTS unique_visitors (
-                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
-                datetime INTEGER NOT NULL,
-                visits INTEGER NOT NULL DEFAULT 0
-            )
-        ''')
-        self._db_c.execute('''
-            CREATE TABLE IF NOT EXISTS visitor_referral (
-                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
-                datetime INTEGER NOT NULL,
-                referral TEXT NOT NULL,
-                visits INTEGER NOT NULL DEFAULT 0
-            )
-        ''')
+        self.astatine.create_function_sql('decrypt', 1, self.aes.decrypt)
 
-    def _end_sql(self):
-        self._conn.commit()
+    def create_routes(self):
+        self.astatine.route('/', 'get', self.index, True)
 
-    def _setup_astatine(self):
-        """Creates all directories."""
-        for directory in self._dirs:
-            if not os.path.exists(directory):
-                os.makedirs(directory)
+        self.astatine.route('/gallery', 'get', self.gallery, True)
+        self.astatine.route('/gallery/upload', 'get', self.post_gallery, True)
+        self.astatine.route('/gallery/upload', 'post', self.post_gallery_post, True)
+        self.astatine.route('/gallery/<uid>/delete', 'delete', self.delete_gallery, True)
 
-    def _download_file(self, filepath) -> static_file:
-        if filepath.split('/')[0] == 'user_data':
-            return static_file(filepath, root="", download=filepath)
-        else:
-            abort(403)
+        self.astatine.route('/projects', 'get', self.projects, True)
+        self.astatine.route('/projects/<uid>', 'get', self.get_project, True)
+        self.astatine.route('/projects/post', 'get', self.post_project, True)
+        self.astatine.route('/projects/post', 'post', self.post_project_post, True)
+        self.astatine.route('/projects/<uid>/edit', 'get', self.edit_project, True)
+        self.astatine.route('/projects/<uid>/edit', 'post', self.edit_project_post, True)
+        self.astatine.route('/projects/<uid>/delete', 'delete', self.delete_project, True)
 
-    def _static_files(self, filepath) -> static_file:
-        name, ext = os.path.splitext(filepath)
-        favicon = False
-        if ext[1:] in self._static_files_ext:
-            favicon = True if ext[1:] == 'ico' else False
-            return static_file(filepath, '') if not favicon else static_file(filepath, '', mimetype='image/x-icon')
-        else:
-            print('Error 404: Could not find file "{}"'.format(filepath))
+        self.astatine.route('/albums/<uid>', 'get', self.get_album, True)
+        self.astatine.route('/album/create', 'get', self.post_album, True)
+        self.astatine.route('/album/create', 'post', self.post_album_post, True)
+        self.astatine.route('/album/append/<uid>', 'get', self.append_album, True)
+        self.astatine.route('/album/append/<uid>', 'post', self.append_album_post, True)
 
-    def _route(self):
-        static_files = functools.partial(self._static_files, filepath='filepath')
-        df = functools.partial(self._download_file, filepath='filepath')
+        self.astatine.route('/blogs', 'get', self.blogs, True)
+        self.astatine.route('/blogs/<uid>', 'get', self.get_blog, True)
+        self.astatine.route('/blogs/post', 'get', self.post_blog, True)
+        self.astatine.route('/blogs/post', 'post', self.post_blog_post, True)
 
-        all_extensions = []
-        for i in self._static_files_ext:
-            all_extensions.append(i)
+        self.astatine.route('/admin', 'get', self.admin, True)
 
-        # self.app.route("/download/<filepath:path>", method='GET', callback=df)
-        self.app.route("/s/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
+        self.astatine.route('/login', 'get', self.get_code, True)
+        self.astatine.route('/login', 'post', self.get_code_post, True)
+        self.astatine.route('/code', 'get', self.send_code, True)
+        self.astatine.route('/code', 'post', self.send_code_post, True)
 
-    def track_visitor(self, session):
-        # checking if ip is banned
-        target_ip = request.environ.get('HTTP_X_FORWARDED_FOR') or request.environ.get('REMOTE_ADDR')
-        hashed_ip = hashlib.sha256(bytes(target_ip, 'utf-8')).hexdigest()
+        self.astatine.route('/trace', 'get', self.trace, True)
 
-        if self._db_c.execute('SELECT TRUE FROM ip_bans WHERE ip_hash = ?', (hashed_ip,)).fetchone()[0]:
-            abort(403)
+        self.astatine.error(self.error_codes, self.errors)
 
+    def _check_visit(self, session):
         date_current = datetime.datetime.now().timestamp()
         date_start = datetime.datetime.combine(datetime.datetime.now(), datetime.time.min).timestamp()
 
-        check_date_start = self._db_c.execute('SELECT * FROM visitors WHERE datetime = ?', (int(date_start),))
-
-        if urlparse(request.environ.get('HTTP_REFERER')).netloc not in ['tyler.contact', 'www.tyler.contact', 'localhost:8080']:
-            if not check_date_start:
-                self._db_c.execute('''
-                    INSERT INTO visitor_referral (uid, datetime, referral, visits) VALUES (?,?,?,?)
-                ''', (self.random_string(8), int(date_start), request.environ.get('HTTP_REFERER'), 1))
-            else:
-                if session['last_visit'] and session['last_visit'] < date_start:
-                    self._db_c.execute('''
-                        UPDATE visitor_referral SET visits = visits + 1 WHERE datetime = ? AND referral = ?
-                    ''', (int(date_start), request.environ.get('HTTP_REFERER')))
-                else:
-                    self._db_c.execute('''
-                        UPDATE visitor_referral SET visits = visits + 1 WHERE datetime = ? AND referral = ?
-                    ''', (int(date_start), request.environ.get('HTTP_REFERER')))
+        check_date_start = self.astatine.execute_sql('SELECT * FROM visit_stats WHERE datetime = ?', (int(date_start), ))
 
         if not session['last_visit']:
-            self._db_c.execute('''UPDATE unique_visitors SET visits = visits + 1''')
+            self.astatine.execute_sql('''UPDATE unique_visit_stats SET visits = visits + 1''')
 
         if not check_date_start:
-            self._db_c.execute('''
-                INSERT INTO visitors (uid, datetime, visits) VALUES (?,?,?)
-            ''', (self.generate_uid('visit_stats', 'uid'), int(date_start), 1))
+            self.astatine.execute_sql('''
+                INSERT INTO visit_stats (uid, datetime, visits) VALUES (?,?,?)
+            ''', (self.astatine.generate_uid('visit_stats', 'uid'), int(date_start), 1))
         else:
-            if session['last_visit'] and session['last_visit'] < date_start:
-                self._db_c.execute('''
-                    UPDATE visitors SET visits = visits + 1 WHERE datetime = ?
-                ''', (int(date_start),))
+            if session['last_visit']:
+                if session['last_visit'] < date_start:
+                    self.astatine.execute_sql('''
+                        UPDATE visit_stats SET visits = visits + 1 WHERE datetime = ?
+                    ''', (int(date_start),))
             else:
-                self._db_c.execute('''
-                    UPDATE visitors SET visits = visits + 1 WHERE datetime = ?
+                self.astatine.execute_sql('''
+                    UPDATE visit_stats SET visits = visits + 1 WHERE datetime = ?
                 ''', (int(date_start),))
 
         session['last_visit'] = date_current
 
-    def enable_sessions(self):
-        """
-        Enable session usage in routes.
-        :return:
-        """
-        self._session_plugin = bottle_pxsession.SessionPlugin(cookie_lifetime=self._life)
-        self.ss = self.app.install(self._session_plugin)
-        self.has_sessions = True
-
-    def route(self, name, method, function, sessions=False, **kwargs):
-        """
-        :param name: The route/name
-        :param method: 'GET', 'PUT', 'DELETE' or 'POST'
-        :param function: The function/method to link to the route.
-        :param sessions: Whether this route should use sessions.
-        :param args: provide extra arguments to the function.
-        :return:
-        """
-        fn = functools.partial(function, kwargs) if kwargs else function
-        if not sessions:
-            self.app.route(name, method=method, callback=fn)
-        elif sessions and self.has_sessions:
-            self.app.route(name, method=method, callback=fn, apply=[self.ss])
-
-    def error(self, code, function):
-        """
-        :param code: Error code to pair with the function, can pass singular code or list of codes
-        :param function: Function callback
-        :return:
-        """
-        if isinstance(code, list):
-            for c in code:
-                self.app.error_handler[c] = function
+    def _authenticate_user(self, session):
+        if session['uid']:
+            user = self.astatine.execute_sql(
+                'SELECT user_uid FROM sessions WHERE session_uid = ?', (session['uid'], )
+            )
+            if not user:
+                abort(403)
         else:
-            self.app.error_handler[code] = function
+            abort(403)
 
-    @staticmethod
-    def random_string(string_length, special=False):
-        letters = string.ascii_letters
-        numbers = string.digits
-        specials = '!£$%&*;:@~#<>,./?'
-        combo = numbers + letters + specials if special else numbers + letters
-        return ''.join(random.choice(combo) for i in range(string_length))
+    def _is_user(self, session):
+        is_user = False
+        if session['uid']:
+            user = self.astatine.execute_sql(
+                'SELECT user_uid FROM sessions WHERE session_uid = ?', (session['uid'], )
+            )
+            if user:
+                is_user = True
+        return is_user
 
-    def generate_uid(self, table_name, id_name, length=20):
-        is_unique, new_id = False, None
-        off_length = length or self.uid_length
-        while not is_unique:
-            new_id = self.random_string(off_length)
-            table = self._cursor.execute(f"SELECT {id_name} FROM {table_name} WHERE {id_name} = ?", (new_id,))
-            for t in table:
-                if not t:
-                    is_unique = False
-                else:
-                    is_unique = True
-            is_unique = True if not [t for t in table] else False
-        return new_id
+    def errors(self, code):
+        return template('html/error.tpl', code=code)
 
-    @staticmethod
-    def upload_files(files, extensions, path, max_file_size=52428800, rename=None):
-        """
-        :param files: A list of the files
-        :param extensions: Any list of extensions or '*' to allow any
-        :param path: The path the file will be saved to.
-        :param max_file_size: The maximum file size per file.
-        :param rename: provide extra arguments to the function.
-        :return:
-        """
-        if not os.path.exists(path):
-            os.makedirs(path)
+    def index(self, session):
+        self._check_visit(session)
+        projects = self.astatine.execute_sql('SELECT * FROM projects ORDER BY timestamp DESC')
+        blogs = self.astatine.execute_sql('SELECT * FROM blogs ORDER BY timestamp DESC LIMIT 2')
+        gallery = self.astatine.execute_sql('''
+                    SELECT a.*, b.footnote, b.uid FROM files a 
+                    INNER JOIN gallery b ON a.uid = b.file_uid
+                    ORDER BY timestamp DESC''')
+        albums = self.astatine.execute_sql('''
+            SELECT a.*, b.path
+            FROM image_albums a 
+            INNER JOIN files b 
+                ON a.thumbnail = b.uid
+            ORDER BY timestamp DESC 
+            LIMIT 2''')
+        return template('html/index.tpl', path=request.url, projects=projects, blogs=blogs, gallery=gallery, albums=albums)
 
-        FILEPATH = None
-        BUF_SIZE = 8192
+    def admin(self, session):
+        self._authenticate_user(session)
+        self._is_user(session)
+        self._check_visit(session)
 
-        try:
-            for file in files:
-                name, ext = os.path.splitext(file.filename)
-                filename = name + ext.lower()
-                if ext in extensions or extensions == '*':
-                    if rename:
-                        FILEPATH = path + rename + ext if path else rename + ext
-                    else:
-                        FILEPATH = path + filename if path else filename
-                    byte_count = 0
-                    data_blocks = []
-                    buf = file.file.read(BUF_SIZE)
-                    while buf:
-                        byte_count += len(buf)
-                        if byte_count > max_file_size:
-                            abort(413)
-                        data_blocks.append(buf)
-                        buf = file.file.read(BUF_SIZE)
-                    data = b''.join(data_blocks)
-                    with open(FILEPATH, 'wb') as f:
-                        f.write(data)
-        except IOError:
-            redirect(request.environ['HTTP_REFERER'])
+        date_start = datetime.datetime.combine(datetime.datetime.now(), datetime.time.min).timestamp()
 
-    @staticmethod
-    def remove_file(file_name):
-        os.remove(str(file_name))
+        date_7_days_ago = datetime.datetime.combine((datetime.datetime.now() - datetime.timedelta(days=7)).date(), datetime.time.min).timestamp()
+        date_30_days_ago = datetime.datetime.combine((datetime.datetime.now() - datetime.timedelta(days=30)).date(),
+                                                    datetime.time.min).timestamp()
 
-    def ip_ban(self, ip=None):
-        target_ip = ip if ip else request.environ.get('HTTP_X_FORWARDED_FOR') or request.environ.get('REMOTE_ADDR')
-        hashed_ip = hashlib.sha256(bytes(target_ip, 'utf-8')).hexdigest()
-        self._db_c.execute('INSERT INTO ip_bans (uid, ip_hash) VALUES (?,?)', (self.random_string(8), hashed_ip))
+        statistics = self.astatine.execute_sql('''
+            SELECT
+                (SELECT sum(visits) FROM visit_stats) AS total_visits, 
+                (SELECT visits FROM visit_stats WHERE datetime = ?) AS today_visits,
+                (SELECT sum(visits) FROM visit_stats WHERE datetime >= ?) AS week_visits,
+                (SELECT sum(visits) FROM visit_stats WHERE datetime >= ?) AS month_visits,
+                (SELECT visits FROM unique_visit_stats) AS unique_visits
+        ''', (date_start, date_7_days_ago, date_30_days_ago), False)
 
-    @staticmethod
-    def check_type(var, var_type):
-        if isinstance(var, var_type):
-            return var
+        stats_graph = self.astatine.execute_sql('''SELECT visits, datetime FROM visit_stats ORDER BY datetime ASC''')
+
+        tracking_statistics = self.astatine.execute_sql('''
+            SELECT a.site, sum(a.visits) AS total_visits, 
+                IFNULL(
+                    (SELECT b.visits FROM visit_tracing b WHERE datetime >= ? AND a.site = b.site), 0) 
+                AS week_visits
+            FROM visit_tracing a
+            GROUP BY a.site
+            ORDER BY total_visits DESC
+        ''', (date_7_days_ago, ))
+
+        return template('html/admin.tpl', path=request.url, statistics=statistics, tracking_statistics=tracking_statistics, stats_graph=stats_graph)
+
+    def trace(self):
+        site = request.query.site
+        route = request.query.route
+        date_start = datetime.datetime.combine(datetime.datetime.now(), datetime.time.min).timestamp()
+
+        check = self.astatine.execute_sql('SELECT * FROM visit_tracing WHERE site = ? AND datetime = ?', (site, date_start))
+
+        if not check:
+            self.astatine.execute_sql('''
+                INSERT INTO visit_tracing (uid, datetime, site, visits) VALUES (?,?,?,?)
+            ''', (self.astatine.generate_uid('visit_tracing', 'uid'), date_start, site, 1))
         else:
-            abort(422)
+            self.astatine.execute_sql('''
+                UPDATE visit_tracing SET visits = visits + 1 WHERE site = ? AND datetime = ?
+            ''', (site, date_start))
+        redirect(f'/{route if route else ""}')
 
-    def run_astatine(self):
-        """
-        Run the bottle website.
-        """
-        try:
-            if self._server:
-                self.app.run(host=self._host,
-                             port=self._port,
-                             debug=self._debug,
-                             reloader=self._reload,
-                             server=self._server,
-                             quiet=self._quiet)
-            else:
-                self.app.run(host=self._host,
-                             port=self._port,
-                             debug=self._debug,
-                             reloader=self._reload,
-                             quiet=self._quiet)
-        finally:
-            if self._sql_name:
-                self._end_sql()
-            self._db.commit()
+    def get_code(self, session):
+        self._check_visit(session)
+        return template('html/user/login.tpl', path=request.url)
 
-    def execute_sql(self, query, values=None, fetchall=True):
-        """
-        :param query: The SQLite3 query you want to make
-        :param values: Any values you need to pass into the SQLite3 query
-        :param fetchall: Whether it should <fetchall> or <fetchone>, default is True
-        :return
-        """
-        execution = None
-        try:
-            self._lock.acquire(True)
-            if values:
-                execution = self._cursor.execute(query, values).fetchall() if fetchall else self._cursor.execute(query, values).fetchone()
-                self._conn.commit()
-            else:
-                execution = self._cursor.execute(query).fetchall() if fetchall else self._cursor.execute(query).fetchone()
-                self._conn.commit()
-        finally:
-            self._lock.release()
-            return execution
-
-    def create_function_sql(self, name, parameters, callback):
-        sqlite3.enable_callback_tracebacks(True)
-        self._conn.create_function(name, parameters, callback)
-
-
-class AstatineSQL(object):
-    """ Astatine SQLite3 Class """
-
-    def __init__(self, path):
-        self._path = path
-        self._cursor = None
-        self._conn = None
-        self._lock = threading.Lock()
-        self.connect()
-
-    def connect(self):
-        """Creates SQLite3 database."""
-        self._conn = sqlite3.connect('{}'.format(self._path), check_same_thread=False)
-        self._cursor = self._conn.cursor()
-
-    def commit(self):
-        self._conn.commit()
-
-    def close(self):
-        self._cursor.close()
-
-    def execute_sql(self, query, values=None, fetchall=True):
-        """
-        :param query: The SQLite3 query you want to make
-        :param values: Any values you need to pass into the SQLite3 query
-        :param fetchall: Whether it should <fetchall> or <fetchone>
-        :return:
-        """
-        execution = None
-        try:
-            self._lock.acquire(True)
-            if values:
-                execution = self._cursor.execute(query, values).fetchall() if fetchall else self._cursor.execute(query, values).fetchone()
-                self._conn.commit()
-            else:
-                execution = self._cursor.execute(query).fetchall() if fetchall else self._cursor.execute(query).fetchone()
-                self._conn.commit()
-        finally:
-            self._lock.release()
-            return execution
-
-    def create_function_sql(self, name, parameters, callback):
-        sqlite3.enable_callback_tracebacks(True)
-        self._conn.create_function(name, parameters, callback)
-
-    @staticmethod
-    def random_string(string_length, special=False):
-        specials = '!£$%&*;:@~#<>,./?'
-        combo = string.ascii_letters + string.digits + (specials if special else None)
-        return ''.join(random.choice(combo) for i in range(string_length))
-
-    def generate_uid(self, table_name, id_name, length=20):
-        is_unique, new_id = False, None
-        while not is_unique:
-            new_id = self.random_string(length)
-            table = self._cursor.execute(f"SELECT {id_name} FROM {table_name} WHERE {id_name} = ?", (new_id,))
-            for t in table:
-                if not t:
-                    is_unique = False
-                else:
-                    is_unique = True
-            is_unique = True if not [t for t in table] else False
-        return new_id
-
-
-class AstatineAES(object):
-    """ Astatine Encryption and Decryption Class """
-
-    def __init__(self, key):
-        if not aes_disabled:
-            self.bs = AES.block_size
-            self.key = hashlib.sha256(key.encode()).digest()
+    def get_code_post(self, session):
+        self._check_visit(session)
+        email = request.forms.get('email')
+        user = self.astatine.execute_sql('SELECT * FROM users WHERE decrypt((SELECT email FROM users)) = ?', (email, ), False)
+        html = None
+        if user:
+            code = self.astatine.random_string(6)
+            self.astatine.execute_sql('INSERT INTO user_codes (uid, user_uid) VALUES (?,?)', (code, user[0]))
+            with open('views/email/login_code.html', 'r') as f:
+                html = f.read().replace('%1', code)
+            self.smtp.send_email(email, 'login code', html=html)
+            redirect('/code')
         else:
-            print("""
-                Error: pycrypto could not be found.
-            """)
+            redirect('/')
 
-    def encrypt(self, raw):
-        raw = self._pad(raw)
-        iv = Random.new().read(AES.block_size)
-        cipher = AES.new(self.key, AES.MODE_CBC, iv)
-        return base64.b64encode(iv + cipher.encrypt(raw.encode()))
+    def send_code(self, session):
+        self._check_visit(session)
+        return template('html/user/code.tpl', path=request.url)
 
-    def decrypt(self, enc):
-        # print(enc)
-        enc = base64.b64decode(enc)
-        iv = enc[:AES.block_size]
-        cipher = AES.new(self.key, AES.MODE_CBC, iv)
-        return self._unpad(cipher.decrypt(enc[AES.block_size:])).decode('utf-8')
+    def send_code_post(self, session):
+        self._check_visit(session)
+        code = request.forms.get('code')
+        check = self.astatine.execute_sql('SELECT * FROM user_codes WHERE uid = ?', (code, ), False)
+        if check:
+            self.astatine.execute_sql('DELETE FROM user_codes WHERE uid = ?', (code, ))
+            session_uid = self.astatine.generate_uid('sessions', 'session_uid')
+            session['uid'] = session_uid
+            self.astatine.execute_sql('INSERT INTO sessions (uid, session_uid, user_uid) VALUES (?,?,?)', (self.astatine.generate_uid('sessions', 'uid'), session_uid, check[1]))
+            redirect('/admin')
+        else:
+            redirect('/')
 
-    def _pad(self, s):
-        return s + (self.bs - len(s) % self.bs) * chr(self.bs - len(s) % self.bs)
+    def post_blog(self, session):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        return template('html/blogs/create.tpl', session=session, path=request.url, old_blog=None)
 
-    @staticmethod
-    def _unpad(s):
-        return s[:-ord(s[len(s) - 1:])]
+    def post_blog_post(self, session):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        title = request.forms.get('title')
+        content = request.forms.get('content')
+        uid = self.astatine.generate_uid('blogs', 'uid')
+        hashtags = request.forms.get('hashtags')
+        self.astatine.execute_sql('INSERT INTO blogs (uid, title, content, hashtags, timestamp) VALUES (?,?,?,?,?)', (uid, title, content, hashtags, datetime.datetime.now().timestamp()))
+        redirect(f'/blogs/{uid}')
+
+    def edit_blog(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        blog = self.astatine.execute_sql('SELECT * FROM blogs WHERE uid = ?', (uid, ), False)
+        return template('html/blogs/create.tpl', session=session, path=request.url, old_blog=blog)
+
+    def edit_blog_post(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        title = request.forms.get('title')
+        content = request.forms.get('content')
+        self.astatine.execute_sql('UPDATE blogs SET title = ?, content = ? WHERE uid = ?', (title, content, uid))
+        redirect(f'/blogs/{uid}')
+
+    def delete_blog(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self.astatine.execute_sql('DELETE FROM blogs WHERE uid = ?', (uid,))
+        redirect('/blogs')
+
+    def post_project(self, session):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        return template('html/projects/create.tpl', session=session, path=request.url, old_project=None)
+
+    def post_project_post(self, session):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        title = request.forms.get('title')
+        description = request.forms.get('description')
+        link = request.forms.get('link')
+        content = request.forms.get('content')
+        uid = self.astatine.generate_uid('projects', 'uid')
+        self.astatine.execute_sql('INSERT INTO projects (uid, title, description, hyperlink, content, timestamp) '
+                                  'VALUES (?,?,?,?,?,?)', (uid, title,
+                                                           description, link, content,
+                                                           datetime.datetime.now().timestamp()))
+        redirect(f'/projects/{uid}')
+
+    def edit_project(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        project = self.astatine.execute_sql('SELECT * FROM projects WHERE uid = ?', (uid, ), False)
+        return template('html/projects/create.tpl', session=session, path=request.url, old_project=project)
+
+    def edit_project_post(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        title = request.forms.get('title')
+        description = request.forms.get('description')
+        link = request.forms.get('link')
+        content = request.forms.get('content')
+        self.astatine.execute_sql('UPDATE projects SET title = ?, description = ?, hyperlink = ?, content = ? WHERE uid = ?', (title, description, link, content, uid))
+        redirect(f'/projects/{uid}')
+
+    def delete_project(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        self.astatine.execute_sql('DELETE FROM projects WHERE uid = ?', (uid,))
+        redirect('/projects')
+
+    def get_album(self, session, uid):
+        files = self.astatine.execute_sql('''
+            SELECT b.*
+            FROM album_files a
+            INNER JOIN files b
+                ON b.uid = a.file_uid
+            WHERE a.album_uid = ?
+            ORDER BY b.timestamp DESC
+        ''', (uid, ))
+        album_name = self.astatine.execute_sql('SELECT name FROM image_albums WHERE uid = ?', (uid,), False)
+        return template('html/albums/album.tpl', session=session, path=request.url, files=files, uid=uid, admin=self._is_user(session), album_name=album_name)
+
+    def post_album(self, session):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        return template('html/albums/create.tpl', session=session, path=request.url)
+
+    def post_album_post(self, session):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        title = request.forms.get('title')
+        thumbnail = request.files.get('thumbnail')
+        album_uid = self.astatine.generate_uid('image_albums', 'uid')
+        thumbnail_uid = self.astatine.generate_uid('files', 'uid')
+        self.astatine.upload_files([thumbnail], '*', f'user_data/albums/{album_uid}/thumbnail/')
+        self.astatine.execute_sql('''
+            INSERT INTO files (uid, path, type, timestamp) VALUES (?,?,?,?)
+        ''', (thumbnail_uid, f'/user_data/albums/{album_uid}/thumbnail/{thumbnail.filename}', 102, datetime.datetime.now().timestamp()))
+        self.astatine.execute_sql('''
+            INSERT INTO image_albums (uid, name, thumbnail, timestamp) VALUES (?,?,?,?)
+        ''', (album_uid, title, thumbnail_uid, datetime.datetime.now().timestamp()))
+        redirect(f'/album/append/{album_uid}')
+
+    def append_album(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        album_name = self.astatine.execute_sql('SELECT name FROM image_albums WHERE uid = ?', (uid, ), False)
+        return template('html/albums/append.tpl', session=session, uid=uid, path=request.url, album_name=album_name)
+
+    def append_album_post(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        file = request.files.get('file')
+        file_uid = self.astatine.generate_uid('files', 'uid')
+        self.astatine.upload_files([file], '*', f'user_data/albums/{uid}/')
+        self.astatine.execute_sql('''
+            INSERT INTO files (uid, path, type, timestamp) VALUES (?,?,?,?)
+        ''', (file_uid, f'/user_data/albums/{uid}/{file.filename}', 103,
+              datetime.datetime.now().timestamp()))
+        self.astatine.execute_sql('''
+            INSERT INTO album_files (uid, album_uid, file_uid) VALUES (?,?,?)
+        ''', (self.astatine.generate_uid('album_files', 'uid'), uid, file_uid))
+        redirect(f'/album/append/{uid}')
+
+    def blogs(self, session):
+        self._check_visit(session)
+        hashtags = request.query.tags
+
+        if hashtags:
+            blogs = self.astatine.execute_sql('SELECT * FROM blogs WHERE hashtags LIKE ? ORDER BY timestamp DESC', ('%' + hashtags + '%', ))
+        else:
+            blogs = self.astatine.execute_sql('SELECT * FROM blogs ORDER BY timestamp DESC')
+        return template('html/blogs.tpl', blogs=blogs, path=request.url, hashtags=hashtags)
+
+    def get_blog(self, session, uid):
+        self._check_visit(session)
+        blog = self.astatine.execute_sql('''SELECT * FROM blogs WHERE uid = ?''', (uid,), False)
+        return template('html/blogs/blog.tpl', blog=blog, path=request.url, admin=self._is_user(session))
+
+    def gallery(self, session):
+        self._check_visit(session)
+        gallery = self.astatine.execute_sql('''
+            SELECT a.*, b.footnote, b.uid FROM files a 
+            INNER JOIN gallery b ON a.uid = b.file_uid
+            ORDER BY timestamp DESC''')
+        return template('html/gallery.tpl', path=request.url, gallery=gallery, admin=self._is_user(session))
+
+    def post_gallery(self, session):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        return template('html/gallery/create.tpl', path=request.url)
+
+    def post_gallery_post(self, session):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        image = request.files.get('image')
+        footnote = request.forms.get('footnote')
+        file_uid = self.astatine.generate_uid('files', 'uid')
+        self.astatine.execute_sql('INSERT INTO files (uid, path, type, timestamp) VALUES(?,?,?,?)', (
+        file_uid, '/user_data/gallery/{}'.format(file_uid + os.path.splitext(image.filename)[1]), 101, datetime.datetime.now().timestamp()))
+        self.astatine.execute_sql('INSERT INTO gallery (uid, file_uid, footnote) VALUES (?,?,?)',
+                                  (self.astatine.generate_uid('gallery', 'uid'), file_uid, footnote))
+        self.astatine.upload_files([image], '*', 'user_data/gallery/', rename=file_uid)
+        redirect('/gallery/upload')
+
+    def delete_gallery(self, session, uid):
+        self._check_visit(session)
+        self._authenticate_user(session)
+        self._is_user(session)
+        file_uid = self.astatine.execute_sql('SELECT file_uid, path FROM gallery WHERE uid = ?', (uid, ), False)
+        self.astatine.execute_sql('DELETE FROM gallery WHERE uid = ?', (uid, ))
+        self.astatine.execute_sql('DELETE FROM files WHERE uid = ?', (file_uid[0], ))
+        os.remove(file_uid[1])
+        redirect('/gallery')
+
+    def projects(self, session):
+        self._check_visit(session)
+        projects = self.astatine.execute_sql('SELECT * FROM projects ORDER BY timestamp DESC')
+        return template('html/projects.tpl', path=request.url, projects=projects)
+
+    def get_project(self, session, uid):
+        self._check_visit(session)
+        project = self.astatine.execute_sql('SELECT * FROM projects WHERE uid = ?', (uid, ), False)
+        return template('html/projects/project.tpl', project=project, path=request.url, admin=self._is_user(session))
 
 
-class AstatineSMTP(object):
-    """ Astatine Email Class """
-
-    def __init__(self, sender):
-        self.email_to = None
-        self.sender = sender
-
-    def send_email(self, receiver, subject, content=None):
-        subprocess.run(['mail', '--content-type=text/html', '-s', subject, '-r', self.sender, receiver,], input=content, text=True)
-
-    def set_sender(self, sender):
-        self.sender = sender
-
-
-class AstatineJSON(object):
-    """ Astatine JSON Class """
-
-    def __init__(self, file):
-        self.file = file
-
-    def read(self):
-        with open(self.file) as f:
-            return json.load(f)
-
-    def write(self, data):
-        with open(self.file) as f:
-            json.dump(data, f)
+if __name__ == '__main__':
+    webapp = Mercury()
+    webapp.astatine.run_astatine()
