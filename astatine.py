@@ -1,9 +1,9 @@
 import base64
-import lib.bottle_pxsession as bottle_pxsession
+import bottle_pxsession as bottle_pxsession
 import subprocess, threading, string, sqlite3, random, os, json, hashlib, functools, hashlib, datetime
 from urllib.parse import urlparse
 
-from lib.bottle import Bottle, static_file, abort, request, redirect
+from bottle import Bottle, static_file, abort, request, redirect
 
 aes_disabled = False
 try:
@@ -93,21 +93,18 @@ class Astatine(object):
         ''')
         self._db_c.execute('''
             CREATE TABLE IF NOT EXISTS visitors (
-                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
                 datetime INTEGER NOT NULL,
                 visits INTEGER NOT NULL DEFAULT 0
             )
         ''')
         self._db_c.execute('''
             CREATE TABLE IF NOT EXISTS unique_visitors (
-                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
                 datetime INTEGER NOT NULL,
                 visits INTEGER NOT NULL DEFAULT 0
             )
         ''')
         self._db_c.execute('''
             CREATE TABLE IF NOT EXISTS visitor_referral (
-                uid TEXT UNIQUE PRIMARY KEY NOT NULL,
                 datetime INTEGER NOT NULL,
                 referral TEXT NOT NULL,
                 visits INTEGER NOT NULL DEFAULT 0
@@ -134,7 +131,7 @@ class Astatine(object):
         favicon = False
         if ext[1:] in self._static_files_ext:
             favicon = True if ext[1:] == 'ico' else False
-            return static_file(filepath, '') if not favicon else static_file(filepath, '', mimetype='image/x-icon')
+            return static_file(filepath, '', parameters=request.query) if not favicon else static_file(filepath, '', mimetype='image/x-icon', parameters=request.query)
         else:
             print('Error 404: Could not find file "{}"'.format(filepath))
 
@@ -149,8 +146,13 @@ class Astatine(object):
         # self.app.route("/download/<filepath:path>", method='GET', callback=df)
         self.app.route("/s/<filepath:re:.*\\.({})>".format("|".join(all_extensions)), method='GET', callback=static_files)
 
-    def track_visitor(self, session):
-        # checking if ip is banned
+    def track_visitor(self, session, domains: list):
+        """
+            :param session: Session object.
+            :param domains: List of domains that are exempt from the check, i.e. to see whether the referral is from outside of this domain.
+            :return:
+        """
+
         target_ip = request.environ.get('HTTP_X_FORWARDED_FOR') or request.environ.get('REMOTE_ADDR')
         hashed_ip = hashlib.sha256(bytes(target_ip, 'utf-8')).hexdigest()
 
@@ -162,11 +164,11 @@ class Astatine(object):
 
         check_date_start = self._db_c.execute('SELECT * FROM visitors WHERE datetime = ?', (int(date_start),))
 
-        if urlparse(request.environ.get('HTTP_REFERER')).netloc not in ['tyler.contact', 'www.tyler.contact', 'localhost:8080']:
+        if urlparse(request.environ.get('HTTP_REFERER')).netloc not in domains:
             if not check_date_start:
                 self._db_c.execute('''
-                    INSERT INTO visitor_referral (uid, datetime, referral, visits) VALUES (?,?,?,?)
-                ''', (self.random_string(8), int(date_start), request.environ.get('HTTP_REFERER'), 1))
+                    INSERT INTO visitor_referral (datetime, referral, visits) VALUES (?,?,?,?)
+                ''', (int(date_start), request.environ.get('HTTP_REFERER'), 1))
             else:
                 if session['last_visit'] and session['last_visit'] < date_start:
                     self._db_c.execute('''
@@ -182,8 +184,8 @@ class Astatine(object):
 
         if not check_date_start:
             self._db_c.execute('''
-                INSERT INTO visitors (uid, datetime, visits) VALUES (?,?,?)
-            ''', (self.generate_uid('visit_stats', 'uid'), int(date_start), 1))
+                INSERT INTO visitors (datetime, visits) VALUES (?,?,?)
+            ''', (int(date_start), 1))
         else:
             if session['last_visit'] and session['last_visit'] < date_start:
                 self._db_c.execute('''
