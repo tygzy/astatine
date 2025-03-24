@@ -41,7 +41,7 @@ class Astatine(object):
         self._sql_name = sql_name
         self._dirs = ['views/', 'views/css/',  'views/svg/',
                       'views/js/', 'views/data/', 'views/fnt/', 'views/img/',
-                      'user_data/', 'db/']
+                      'user_data/', 'sql/']
         self._plugin_manager = None
         self._session_plugin = None
         self._lock = threading.Lock()
@@ -83,7 +83,7 @@ class Astatine(object):
         self.cursor = self._cursor
 
     def _setup_db(self):
-        self._db = sqlite3.connect('db/site_data.db', check_same_thread=False)
+        self._db = sqlite3.connect('sql/site_data.db', check_same_thread=False)
         self._db_c = self._db.cursor()
         self._db_c.execute('''
             CREATE TABLE IF NOT EXISTS ip_bans (
@@ -112,6 +112,8 @@ class Astatine(object):
         ''')
 
     def _end_sql(self):
+        self._db_c.close()
+        self._db.commit()
         self._conn.commit()
 
     def _setup_astatine(self):
@@ -156,45 +158,50 @@ class Astatine(object):
         target_ip = request.environ.get('HTTP_X_FORWARDED_FOR') or request.environ.get('REMOTE_ADDR')
         hashed_ip = hashlib.sha256(bytes(target_ip, 'utf-8')).hexdigest()
 
-        if self._db_c.execute('SELECT TRUE FROM ip_bans WHERE ip_hash = ?', (hashed_ip,)).fetchone()[0]:
+        if self._db_c.execute('SELECT TRUE FROM ip_bans WHERE ip_hash = ?', (hashed_ip,)).fetchone():
             abort(403)
-
         date_current = datetime.datetime.now().timestamp()
         date_start = datetime.datetime.combine(datetime.datetime.now(), datetime.time.min).timestamp()
 
         check_date_start = self._db_c.execute('SELECT * FROM visitors WHERE datetime = ?', (int(date_start),))
 
         if urlparse(request.environ.get('HTTP_REFERER')).netloc not in domains:
-            if not check_date_start:
+            if not check_date_start.fetchone():
                 self._db_c.execute('''
-                    INSERT INTO visitor_referral (datetime, referral, visits) VALUES (?,?,?,?)
+                    INSERT INTO visitor_referral (datetime, referral, visits) VALUES (?,?,?)
                 ''', (int(date_start), request.environ.get('HTTP_REFERER'), 1))
             else:
                 if session['last_visit'] and session['last_visit'] < date_start:
                     self._db_c.execute('''
                         UPDATE visitor_referral SET visits = visits + 1 WHERE datetime = ? AND referral = ?
                     ''', (int(date_start), request.environ.get('HTTP_REFERER')))
-                else:
+                    session['last_visit'] = date_start
+                elif not session['last_visit']:
                     self._db_c.execute('''
                         UPDATE visitor_referral SET visits = visits + 1 WHERE datetime = ? AND referral = ?
                     ''', (int(date_start), request.environ.get('HTTP_REFERER')))
+                    session['last_visit'] = date_start
 
         if not session['last_visit']:
             self._db_c.execute('''UPDATE unique_visitors SET visits = visits + 1''')
 
-        if not check_date_start:
+        if not check_date_start.fetchone():
             self._db_c.execute('''
-                INSERT INTO visitors (datetime, visits) VALUES (?,?,?)
+                INSERT INTO visitors (datetime, visits) VALUES (?,?)
             ''', (int(date_start), 1))
         else:
             if session['last_visit'] and session['last_visit'] < date_start:
                 self._db_c.execute('''
                     UPDATE visitors SET visits = visits + 1 WHERE datetime = ?
                 ''', (int(date_start),))
-            else:
+                session['last_visit'] = date_start
+            elif not session['last_visit']:
                 self._db_c.execute('''
                     UPDATE visitors SET visits = visits + 1 WHERE datetime = ?
                 ''', (int(date_start),))
+                session['last_visit'] = date_start
+
+        self._db.commit()
 
         session['last_visit'] = date_current
 
